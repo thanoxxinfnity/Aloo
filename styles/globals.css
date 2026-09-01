@@ -1,0 +1,290 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==========================================================================
+   ALOO — Year 2100 Sci-Fi HUD design system
+   ==========================================================================
+   Everything is token-driven so the whole interface can be re-tinted from
+   these six variables. The aesthetic rests on three ideas:
+     1. Nothing is opaque — panels are glass over the live WebGL scene.
+     2. Light is information — a glow means something is active.
+     3. Edges are engineered — corner brackets, hairlines, monospace data.
+   ========================================================================== */
+
+:root {
+  --aloo-void: #0b0f19;
+  --aloo-abyss: #070a12;
+  --aloo-cyan: #38bdf8;
+  --aloo-violet: #818cf8;
+  --aloo-ok: #34d399;
+  --aloo-warn: #fbbf24;
+  --aloo-danger: #f472b6;
+  --aloo-glass: rgba(13, 21, 38, 0.55);
+  --aloo-edge: rgba(56, 189, 248, 0.22);
+}
+
+html,
+body,
+#__next {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--aloo-abyss);
+  color: #dbeafe;
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow: hidden; /* the app is a fixed HUD, not a scrolling document */
+  -webkit-font-smoothing: antialiased;
+}
+
+/* --- Scrollbars ---------------------------------------------------------- */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(56, 189, 248, 0.04);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(56, 189, 248, 0.28);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(56, 189, 248, 0.5);
+}
+
+/* --- Component layer ------------------------------------------------------ */
+@layer components {
+  /* The core glassmorphism panel. */
+  .glass {
+    background: var(--aloo-glass);
+    backdrop-filter: blur(18px) saturate(140%);
+    -webkit-backdrop-filter: blur(18px) saturate(140%);
+    border: 1px solid var(--aloo-edge);
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.02) inset,
+      0 8px 40px rgba(0, 0, 0, 0.55);
+  }
+
+  .glass-strong {
+    background: rgba(9, 15, 28, 0.86);
+    backdrop-filter: blur(26px) saturate(150%);
+    -webkit-backdrop-filter: blur(26px) saturate(150%);
+    border: 1px solid var(--aloo-edge);
+  }
+
+  /* Engineered corner brackets — the single cheapest "HUD" signal there is. */
+  .bracket {
+    position: relative;
+  }
+  .bracket::before,
+  .bracket::after {
+    content: '';
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    border-color: var(--aloo-cyan);
+    opacity: 0.65;
+    pointer-events: none;
+  }
+  .bracket::before {
+    top: -1px;
+    left: -1px;
+    border-top: 1px solid;
+    border-left: 1px solid;
+  }
+  .bracket::after {
+    bottom: -1px;
+    right: -1px;
+    border-bottom: 1px solid;
+    border-right: 1px solid;
+  }
+
+  .hud-label {
+    @apply text-[10px] uppercase tracking-[0.22em] text-cyan-300/60;
+  }
+
+  .hud-value {
+    @apply text-[11px] tabular-nums text-cyan-100/90;
+  }
+
+  .hud-btn {
+    @apply relative flex items-center justify-center gap-2 rounded-md border px-3 py-2
+           text-[11px] uppercase tracking-[0.14em] transition-all duration-200;
+    border-color: rgba(56, 189, 248, 0.25);
+    color: rgba(186, 230, 253, 0.85);
+    background: rgba(56, 189, 248, 0.05);
+  }
+  .hud-btn:hover:not(:disabled) {
+    border-color: rgba(56, 189, 248, 0.6);
+    background: rgba(56, 189, 248, 0.14);
+    color: #e0f2fe;
+    box-shadow: 0 0 16px rgba(56, 189, 248, 0.25);
+  }
+  .hud-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+  .hud-btn-active {
+    border-color: rgba(56, 189, 248, 0.85) !important;
+    background: rgba(56, 189, 248, 0.2) !important;
+    color: #f0f9ff !important;
+    box-shadow: 0 0 22px rgba(56, 189, 248, 0.4);
+  }
+  .hud-btn-danger {
+    border-color: rgba(244, 114, 182, 0.5);
+    background: rgba(244, 114, 182, 0.12);
+    color: #fbcfe8;
+  }
+  .hud-btn-danger:hover:not(:disabled) {
+    border-color: rgba(244, 114, 182, 0.9);
+    background: rgba(244, 114, 182, 0.22);
+    box-shadow: 0 0 18px rgba(244, 114, 182, 0.3);
+  }
+
+  .hud-input {
+    @apply w-full rounded-md border bg-black/40 px-3 py-2 text-[12px] text-cyan-50
+           outline-none transition-colors placeholder:text-cyan-200/25;
+    border-color: rgba(56, 189, 248, 0.2);
+  }
+  .hud-input:focus {
+    border-color: rgba(56, 189, 248, 0.7);
+    box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.25), 0 0 18px rgba(56, 189, 248, 0.15);
+  }
+
+  .hud-select {
+    @apply hud-input appearance-none pr-8;
+    background-image: linear-gradient(45deg, transparent 50%, rgba(56, 189, 248, 0.7) 50%),
+      linear-gradient(135deg, rgba(56, 189, 248, 0.7) 50%, transparent 50%);
+    background-position: calc(100% - 16px) 50%, calc(100% - 11px) 50%;
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+  }
+  .hud-select option {
+    background: #0b0f19;
+    color: #e0f2fe;
+  }
+
+  /* Range slider, restyled to look like a machine control. */
+  .hud-range {
+    @apply h-1 w-full cursor-pointer appearance-none rounded-full;
+    background: linear-gradient(90deg, rgba(56, 189, 248, 0.6), rgba(129, 140, 248, 0.35));
+  }
+  .hud-range::-webkit-slider-thumb {
+    @apply h-3 w-3 appearance-none rounded-full;
+    background: #38bdf8;
+    box-shadow: 0 0 10px rgba(56, 189, 248, 0.9);
+    cursor: grab;
+  }
+  .hud-range::-moz-range-thumb {
+    @apply h-3 w-3 rounded-full border-0;
+    background: #38bdf8;
+    box-shadow: 0 0 10px rgba(56, 189, 248, 0.9);
+  }
+
+  .status-dot {
+    @apply inline-block h-1.5 w-1.5 rounded-full;
+  }
+
+  /* Typewriter caret shown while a reply streams in. */
+  .caret::after {
+    content: '▋';
+    margin-left: 2px;
+    animation: caret-blink 1s steps(1) infinite;
+    color: var(--aloo-cyan);
+  }
+}
+
+@keyframes caret-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+/* Animated HUD grid, drawn behind everything as two scrolling line sets. */
+.hud-grid {
+  background-image:
+    linear-gradient(rgba(56, 189, 248, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(56, 189, 248, 0.055) 1px, transparent 1px);
+  background-size: 48px 48px;
+  animation: grid-drift 26s linear infinite;
+}
+
+@keyframes grid-drift {
+  from { background-position: 0 0, 0 0; }
+  to { background-position: 0 48px, 48px 0; }
+}
+
+/* CRT scanlines — subtle enough to read text through. */
+.scanlines::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(0, 0, 0, 0.16) 0px,
+    rgba(0, 0, 0, 0.16) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  mix-blend-mode: multiply;
+}
+
+/* A single bright line sweeping the viewport. */
+.sweep {
+  background: linear-gradient(
+    180deg,
+    transparent,
+    rgba(56, 189, 248, 0.11) 45%,
+    rgba(129, 140, 248, 0.16) 50%,
+    rgba(56, 189, 248, 0.11) 55%,
+    transparent
+  );
+}
+
+/* Markdown rendered inside chat bubbles. */
+.md h1, .md h2, .md h3 {
+  @apply mb-1 mt-3 font-semibold tracking-wide text-cyan-200;
+}
+.md h1 { @apply text-sm; }
+.md h2 { @apply text-[13px]; }
+.md h3 { @apply text-[12px]; }
+.md p { @apply mb-2 leading-relaxed; }
+.md ul { @apply mb-2 ml-4 list-disc space-y-1; }
+.md ol { @apply mb-2 ml-4 list-decimal space-y-1; }
+.md code {
+  @apply rounded bg-black/50 px-1 py-0.5 text-[11px] text-cyan-300;
+}
+.md pre {
+  @apply mb-2 overflow-x-auto rounded-md border border-cyan-400/15 bg-black/60 p-3 text-[11px];
+}
+.md pre code { @apply bg-transparent p-0; }
+.md a { @apply text-cyan-400 underline underline-offset-2 hover:text-cyan-300; }
+.md strong { @apply font-semibold text-cyan-100; }
+.md blockquote { @apply my-2 border-l-2 border-cyan-400/40 pl-3 italic text-cyan-100/70; }
+
+/* Users who ask for less motion get a still HUD. */
+@media (prefers-reduced-motion: reduce) {
+  .hud-grid,
+  .sweep,
+  .caret::after {
+    animation: none !important;
+  }
+}
+
+/* Research citation markers rendered by lib/markdown.js */
+.md .cite {
+  @apply mx-0.5 rounded bg-violet-400/15 px-1 text-[9px] font-medium text-violet-300;
+  vertical-align: super;
+  line-height: 1;
+}
+
+.md hr {
+  @apply my-3 border-0 border-t border-cyan-400/15;
+}
+
+.md del {
+  @apply text-cyan-100/40 line-through;
+}

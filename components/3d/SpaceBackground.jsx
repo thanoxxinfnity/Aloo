@@ -1,0 +1,225 @@
+/**
+ * ALOO — Deep-space environment (the layer BEHIND the avatar).
+ * ===========================================================================
+ * Two rendering paths:
+ *
+ *  A) USER MODEL — if `/models/space.glb` exists it is loaded, scaled up and
+ *     given a slow ambient yaw. It renders with depthWrite disabled and a large
+ *     scale so it always reads as an infinitely distant backdrop rather than
+ *     geometry the avatar could clip into.
+ *
+ *  B) PROCEDURAL — the zero-asset default: a layered starfield, a drifting
+ *     particle field, and a nebula built from an additively-blended gradient
+ *     shell. Costs almost nothing and means ALOO looks finished on first boot.
+ *
+ * All motion is time-based inside useFrame, so it is frame-rate independent.
+ */
+
+import { useRef, useMemo, Suspense } from 'react';
+import { useFrame, useLoader } from '@react-three/fiber';
+import { Stars, Sparkles } from '@react-three/drei';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import * as THREE from 'three';
+import useAssetAvailable from '@/hooks/useAssetAvailable';
+
+/* -------------------------------------------------------------------------- */
+/* A) User-supplied space.glb                                                  */
+/* -------------------------------------------------------------------------- */
+
+function SpaceModel({ url, rotationSpeed, opacity }) {
+  const gltf = useLoader(GLTFLoader, url);
+  const group = useRef();
+
+  // Clone so React StrictMode's double-mount can't attach one scene twice.
+  const scene = useMemo(() => {
+    const clone = gltf.scene.clone(true);
+    clone.traverse((node) => {
+      if (!node.isMesh) return;
+      node.frustumCulled = false;
+      // A backdrop must never occlude the avatar, whatever its authored scale.
+      const mats = Array.isArray(node.material) ? node.material : [node.material];
+      mats.forEach((m) => {
+        if (!m) return;
+        m.depthWrite = false;
+        m.side = THREE.BackSide;
+        m.toneMapped = false;
+        if (opacity < 1) {
+          m.transparent = true;
+          m.opacity = opacity;
+        }
+      });
+      node.renderOrder = -10;
+    });
+    return clone;
+  }, [gltf, opacity]);
+
+  useFrame((_, delta) => {
+    if (group.current) group.current.rotation.y += rotationSpeed * delta;
+  });
+
+  return (
+    <group ref={group}>
+      <primitive object={scene} scale={60} />
+    </group>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* B) Procedural fallback                                                      */
+/* -------------------------------------------------------------------------- */
+
+/** A soft additive nebula shell — cheap volumetric-looking depth. */
+function Nebula({ color, position, scale, speed }) {
+  const ref = useRef();
+
+  // A radial-gradient canvas texture is far cheaper than a real volume and,
+  // additively blended on a billboard, is indistinguishable at this distance.
+  const texture = useMemo(() => {
+    const size = 256;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    const grad = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    grad.addColorStop(0, 'rgba(255,255,255,0.55)');
+    grad.addColorStop(0.35, 'rgba(255,255,255,0.18)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, size, size);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }, []);
+
+  useFrame((state) => {
+    if (!ref.current) return;
+    const t = state.clock.elapsedTime;
+    ref.current.rotation.z = t * speed;
+    // Slow breathing keeps the backdrop alive without drawing attention.
+    const s = scale * (1 + Math.sin(t * speed * 3) * 0.04);
+    ref.current.scale.set(s, s, s);
+  });
+
+  return (
+    <sprite ref={ref} position={position}>
+      <spriteMaterial
+        map={texture}
+        color={color}
+        transparent
+        opacity={0.5}
+        blending={THREE.AdditiveBlending}
+        depthWrite={false}
+        toneMapped={false}
+      />
+    </sprite>
+  );
+}
+
+/** Slowly drifting dust — parallax cue that sells "we are moving through space". */
+function DustField({ count, rotationSpeed }) {
+  const ref = useRef();
+
+  const geometry = useMemo(() => {
+    const positions = new Float32Array(count * 3);
+    const colors = new Float32Array(count * 3);
+    const cyan = new THREE.Color('#38bdf8');
+    const violet = new THREE.Color('#818cf8');
+    const tmp = new THREE.Color();
+
+    for (let i = 0; i < count; i++) {
+      // Distribute on a spherical shell so density looks even from the centre.
+      const r = 28 + Math.random() * 42;
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(2 * Math.random() - 1);
+      positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+      positions[i * 3 + 1] = r * Math.cos(phi) * 0.6; // flatten vertically
+      positions[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
+
+      tmp.copy(cyan).lerp(violet, Math.random());
+      colors[i * 3] = tmp.r;
+      colors[i * 3 + 1] = tmp.g;
+      colors[i * 3 + 2] = tmp.b;
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    return geo;
+  }, [count]);
+
+  useFrame((state, delta) => {
+    if (!ref.current) return;
+    ref.current.rotation.y += rotationSpeed * delta * 0.6;
+    ref.current.rotation.x = Math.sin(state.clock.elapsedTime * 0.05) * 0.05;
+  });
+
+  return (
+    <points ref={ref} geometry={geometry} frustumCulled={false}>
+      <pointsMaterial
+        size={0.22}
+        sizeAttenuation
+        vertexColors
+        transparent
+        opacity={0.75}
+        blending={THREE.AdditiveBlending}
+        depthWrite={false}
+      />
+    </points>
+  );
+}
+
+function ProceduralSpace({ rotationSpeed, particleDensity }) {
+  const group = useRef();
+
+  useFrame((_, delta) => {
+    if (group.current) group.current.rotation.y += rotationSpeed * delta * 0.35;
+  });
+
+  return (
+    <group ref={group}>
+      {/* Two star layers at different radii create genuine parallax on orbit. */}
+      <Stars radius={90} depth={55} count={4000} factor={4} saturation={0} fade speed={0.4} />
+      <Stars radius={45} depth={25} count={1200} factor={2.4} saturation={0.6} fade speed={0.8} />
+
+      <DustField count={particleDensity} rotationSpeed={rotationSpeed} />
+
+      {/* Glowing motes near the avatar — foreground depth cue. */}
+      <Sparkles count={90} scale={[14, 8, 14]} size={2.6} speed={0.32} opacity={0.5} color="#38bdf8" />
+
+      <Nebula color="#4f46e5" position={[-26, 8, -40]} scale={44} speed={0.02} />
+      <Nebula color="#0ea5e9" position={[30, -4, -46]} scale={38} speed={-0.017} />
+      <Nebula color="#a21caf" position={[6, 18, -55]} scale={30} speed={0.012} />
+
+      {/* A dark shell closes the horizon so the void never shows the clear colour. */}
+      <mesh renderOrder={-20}>
+        <sphereGeometry args={[140, 32, 32]} />
+        <meshBasicMaterial color="#05070f" side={THREE.BackSide} depthWrite={false} fog={false} />
+      </mesh>
+    </group>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+
+export default function SpaceBackground({
+  url = '/models/space.glb',
+  rotationSpeed = 0.015,
+  particleDensity = 1400,
+  opacity = 1,
+}) {
+  const status = useAssetAvailable(url);
+
+  return (
+    <group>
+      {/* The procedural layer always renders: it is both the fallback and the
+          particle/atmosphere pass that sits on top of a user-supplied GLB. */}
+      <ProceduralSpace rotationSpeed={rotationSpeed} particleDensity={particleDensity} />
+
+      {status === 'available' && (
+        <Suspense fallback={null}>
+          <SpaceModel url={url} rotationSpeed={rotationSpeed} opacity={opacity} />
+        </Suspense>
+      )}
+    </group>
+  );
+}
