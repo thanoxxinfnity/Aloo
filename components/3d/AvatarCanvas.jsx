@@ -31,6 +31,7 @@ import { Canvas, useFrame, useLoader, useThree } from '@react-three/fiber';
 import { ContactShadows, useAnimations, Float } from '@react-three/drei';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
+import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import * as THREE from 'three';
 
 import SpaceBackground from './SpaceBackground';
@@ -57,15 +58,25 @@ function configureLoader(loader) {
 /* GLB-backed avatar                                                           */
 /* -------------------------------------------------------------------------- */
 
-function AvatarModel({ url, scale, offset, onReport }) {
+function AvatarModel({ url, scale, offset, settings, onReport }) {
   const gltf = useLoader(GLTFLoader, url, configureLoader);
   const group = useRef();
   const { pointer } = useThree();
 
-  // Clone the scene so React StrictMode's double-mount cannot bind one
-  // skinned mesh into two scene graphs (which silently breaks skinning).
+  /**
+   * Clone the scene so React StrictMode's double-mount cannot bind one skinned
+   * mesh into two scene graphs.
+   *
+   * MUST be SkeletonUtils.clone, NOT Object3D.clone(true). A plain clone copies
+   * the SkinnedMesh but leaves it bound to the ORIGINAL Skeleton — so the
+   * cloned bones are inert decorations, and the mesh renders from bones that
+   * are not in this scene graph at all. Symptoms are maddening and silent:
+   * every bone animation is a no-op, and any transform applied to an ancestor
+   * group (our auto-fit scale) has no effect on the rendered vertices, because
+   * the skinning matrices come from a skeleton outside that group.
+   */
   const scene = useMemo(() => {
-    const clone = gltf.scene.clone(true);
+    const clone = cloneSkinned(gltf.scene);
     clone.traverse((n) => {
       if (n.isMesh || n.isSkinnedMesh) {
         n.castShadow = true;
@@ -92,6 +103,10 @@ function AvatarModel({ url, scale, offset, onReport }) {
         jaw: findBone(scene, ['jaw']),
         leftEye: findBone(scene, ['lefteye', 'eyel']),
         rightEye: findBone(scene, ['righteye', 'eyer']),
+        leftArm: findBone(scene, ['leftarm', 'lupperarm', 'upperarml']),
+        rightArm: findBone(scene, ['rightarm', 'rupperarm', 'upperarmr']),
+        leftForeArm: findBone(scene, ['leftforearm', 'lforearm']),
+        rightForeArm: findBone(scene, ['rightforearm', 'rforearm']),
       },
       // Which mouth channel do we actually have? Decided once, not per frame.
       hasVisemes: report.visemeChecks.found.length >= 4,
@@ -101,15 +116,74 @@ function AvatarModel({ url, scale, offset, onReport }) {
     };
   }, [gltf, scene, url]);
 
-  // Cache each bone's authored rest rotation — every procedural offset is
-  // applied relative to this, so we never accumulate drift.
+  /* ---- Auto-fit -----------------------------------------------------------
+     Imported models arrive in arbitrary units and origins. This project's
+     avatar, for example, is 23.3 units tall with its feet at y=0 — dropped into
+     a scene calibrated for a 1.7m human it would fill the sky. We measure the
+     bind-pose bounding box once and derive a uniform scale plus a centring
+     offset, then apply them on an INNER group so the user's own scale/offset
+     sliders still compose on top. */
+  const fit = useMemo(() => {
+    if (!settings.autoFit) return { scale: 1, offset: [0, 0, 0], measured: null };
+    const box = new THREE.Box3().setFromObject(scene);
+    const size = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    box.getSize(size);
+    box.getCenter(center);
+    if (!Number.isFinite(size.y) || size.y <= 0) {
+      return { scale: 1, offset: [0, 0, 0], measured: null };
+    }
+    const k = (settings.avatarTargetHeight || 1.72) / size.y;
+    // Diagnostics: imported units are the single most common reason an avatar
+    // "does not appear" (it is actually 20x too big and the camera is inside it).
+    /* eslint-disable-next-line no-console */
+    console.info(
+      `[ALOO/3d] Auto-fit: measured ${size.x.toFixed(2)} x ${size.y.toFixed(2)} x ${size.z.toFixed(
+        2
+      )} units -> scale ${k.toFixed(4)} for a ${(settings.avatarTargetHeight || 1.72).toFixed(2)}m target.`
+    );
+    return {
+      scale: k,
+      // Centre horizontally, and put the lowest vertex exactly on the floor.
+      offset: [-center.x * k, -box.min.y * k, -center.z * k],
+      measured: { height: size.y, width: size.x, depth: size.z },
+    };
+  }, [scene, settings.autoFit, settings.avatarTargetHeight]);
+
+  /* ---- A-pose correction + rest snapshot -----------------------------------
+     Mixamo-style rigs stand in a T-pose, which reads as a mannequin rather than
+     a character, and this model ships no idle clip to pose it. So we rotate the
+     upper-arm bones down ourselves.
+
+     TIMING MATTERS: this has to happen during render, not in an effect. `rest`
+     below snapshots the bone rotations and the frame loop lerps every bone back
+     toward `rest` — so a pose applied in useEffect (which runs AFTER the memo)
+     would be captured as "not the rest pose" and immediately animated away.
+
+     The bind rotation is stashed in userData so re-running with a different
+     angle sets an absolute value instead of accumulating. */
   const rest = useMemo(() => {
+    const rad = THREE.MathUtils.degToRad(settings.aPoseAngle || 62);
+    const posed = settings.autoAPose && !gltf.animations?.length;
+
+    const armDown = (bone, sign) => {
+      if (!bone) return;
+      if (bone.userData.__alooBindZ === undefined) {
+        bone.userData.__alooBindZ = bone.rotation.z;
+      }
+      bone.rotation.z = bone.userData.__alooBindZ + (posed ? sign * rad : 0);
+    };
+    // Sign is per-rig: for this Mixamo-style bind orientation, negative Z on
+    // the left upper arm and positive on the right rotates them downward.
+    armDown(rig.bones.leftArm, -1);
+    armDown(rig.bones.rightArm, 1);
+
     const snap = {};
     Object.entries(rig.bones).forEach(([k, bone]) => {
       if (bone) snap[k] = bone.rotation.clone();
     });
     return snap;
-  }, [rig]);
+  }, [rig, gltf.animations, settings.autoAPose, settings.aPoseAngle]);
 
   useEffect(() => {
     onReport?.(rig.report);
@@ -142,9 +216,13 @@ function AvatarModel({ url, scale, offset, onReport }) {
       // Amplitude-only fallback: one blendshape, driven by loudness.
       for (const m of rig.mouthMorphs) applyMorph(rig.morphIndex, m, f.mouthOpen);
     } else if (rig.bones.jaw) {
-      // Last resort: rotate the jaw bone directly (~17° at full open).
+      // Tier 3: rotate the jaw bone directly (~17° at full open).
       rig.bones.jaw.rotation.x = (rest.jaw?.x || 0) + f.jawOpen * 0.3;
     }
+    // Tier 4 (no visemes, no mouth morphs, no jaw bone — this project's avatar)
+    // is handled by the body-performance block below: the character cannot move
+    // its lips, so it speaks with its head, spine and shoulders instead.
+    const bodyPerformance = !rig.hasVisemes && !rig.mouthMorphs.length && !rig.bones.jaw;
 
     /* ---- 2. Blink & expression -------------------------------------------- */
     if (rig.blinkMorphs.length) {
@@ -162,17 +240,30 @@ function AvatarModel({ url, scale, offset, onReport }) {
     if (rig.bones.head && rest.head) {
       const targetY = THREE.MathUtils.clamp(pointer.x * 0.42, -0.5, 0.5);
       const targetX = THREE.MathUtils.clamp(-pointer.y * 0.26, -0.3, 0.3);
-      // Speaking adds a small rhythmic nod — silent heads look embalmed.
-      const emphasis = f.speaking ? Math.sin(t * 6.5) * 0.03 * f.energy : 0;
+
+      // Speech emphasis. On a rig WITH a mouth this is a light rhythmic nod so
+      // the head is not embalmed. On a rig with NO face controls it becomes the
+      // primary performance: a strong syllable-rate nod plus a slower tilt,
+      // which is what makes the character read as talking at all.
+      const gain = bodyPerformance ? 1 : 0.28;
+      const nod = f.speaking ? Math.sin(t * 7.4) * 0.085 * f.energy * gain : 0;
+      const tilt = f.speaking ? Math.sin(t * 2.6) * 0.07 * f.energy * gain : 0;
+      const turn = f.speaking ? Math.sin(t * 1.7) * 0.06 * f.energy * gain : 0;
+
       rig.bones.head.rotation.y = THREE.MathUtils.lerp(
         rig.bones.head.rotation.y,
-        rest.head.y + targetY,
+        rest.head.y + targetY + turn,
         delta * 3.2
       );
       rig.bones.head.rotation.x = THREE.MathUtils.lerp(
         rig.bones.head.rotation.x,
-        rest.head.x + targetX + emphasis,
+        rest.head.x + targetX + nod,
         delta * 3.2
+      );
+      rig.bones.head.rotation.z = THREE.MathUtils.lerp(
+        rig.bones.head.rotation.z,
+        rest.head.z + tilt,
+        delta * 3.0
       );
     }
     if (rig.bones.neck && rest.neck) {
@@ -190,6 +281,44 @@ function AvatarModel({ url, scale, offset, onReport }) {
       // ~14 breaths/min at rest, faster and shallower while speaking.
       const rate = f.speaking ? 1.9 : 1.15;
       rig.bones.spine.rotation.x = rest.spine.x + Math.sin(t * rate) * 0.022;
+      // A touch of torso rotation on emphasis — speaking with the whole body.
+      rig.bones.spine.rotation.y = THREE.MathUtils.lerp(
+        rig.bones.spine.rotation.y,
+        rest.spine.y + (f.speaking ? Math.sin(t * 1.3) * 0.05 * f.energy : 0),
+        delta * 2
+      );
+    }
+
+    /* ---- 4b. Arms: idle sway, and gesture while speaking -------------------- */
+    const armSwing = Math.sin(t * 0.72) * 0.03;
+    const gesture = f.speaking ? f.energy * 0.16 : 0;
+    if (rig.bones.leftArm && rest.leftArm) {
+      rig.bones.leftArm.rotation.z = THREE.MathUtils.lerp(
+        rig.bones.leftArm.rotation.z,
+        rest.leftArm.z + armSwing + gesture * Math.sin(t * 3.1),
+        delta * 2.4
+      );
+    }
+    if (rig.bones.rightArm && rest.rightArm) {
+      rig.bones.rightArm.rotation.z = THREE.MathUtils.lerp(
+        rig.bones.rightArm.rotation.z,
+        rest.rightArm.z - armSwing - gesture * Math.sin(t * 3.1 + 0.9),
+        delta * 2.4
+      );
+    }
+    if (rig.bones.leftForeArm && rest.leftForeArm) {
+      rig.bones.leftForeArm.rotation.y = THREE.MathUtils.lerp(
+        rig.bones.leftForeArm.rotation.y,
+        rest.leftForeArm.y + gesture * 0.7 * Math.sin(t * 2.3),
+        delta * 2.2
+      );
+    }
+    if (rig.bones.rightForeArm && rest.rightForeArm) {
+      rig.bones.rightForeArm.rotation.y = THREE.MathUtils.lerp(
+        rig.bones.rightForeArm.rotation.y,
+        rest.rightForeArm.y - gesture * 0.7 * Math.sin(t * 2.3 + 0.6),
+        delta * 2.2
+      );
     }
 
     /* ---- 5. Whole-body micro-sway ------------------------------------------ */
@@ -201,7 +330,11 @@ function AvatarModel({ url, scale, offset, onReport }) {
 
   return (
     <group ref={group} position={offset} scale={scale} dispose={null}>
-      <primitive object={scene} />
+      {/* Inner group carries the measured auto-fit transform; the outer group
+          carries the user's own scale/offset, so the two never fight. */}
+      <group position={fit.offset} scale={fit.scale}>
+        <primitive object={scene} />
+      </group>
     </group>
   );
 }
@@ -502,11 +635,13 @@ export default function AvatarCanvas({
         toneMapping: THREE.ACESFilmicToneMapping,
         toneMappingExposure: 1.05,
       }}
-      camera={{ position: [0, 1.46, 1.95], fov: 38, near: 0.1, far: 300 }}
+      camera={{ position: [0, 1.46, 1.95], fov: 38, near: 0.1, far: 900 }}
       style={{ opacity: settings.canvasOpacity ?? 1 }}
     >
       {/* Fog hides the far shell seam and adds atmospheric depth. */}
-      <fog attach="fog" args={['#070a12', 8, 60]} />
+      {/* Fog only reaches the near-field particles; the galaxy backdrop opts out
+          via `material.fog = false` so distance never washes it grey. */}
+      <fog attach="fog" args={['#070a12', 10, 90]} />
 
       <Lighting />
 
@@ -514,6 +649,10 @@ export default function AvatarCanvas({
         url={settings.spaceModelUrl}
         rotationSpeed={settings.ambientRotationSpeed}
         particleDensity={settings.particleDensity}
+        fitRadius={settings.spaceFitRadius}
+        offsetY={settings.spaceOffsetY}
+        offsetZ={settings.spaceOffsetZ}
+        tilt={settings.spaceTilt}
       />
 
       <Suspense fallback={fallback}>
@@ -523,6 +662,7 @@ export default function AvatarCanvas({
               url={settings.avatarModelUrl}
               scale={scale}
               offset={offset}
+              settings={settings}
               onReport={onRiggingReport}
             />
           </ModelErrorBoundary>

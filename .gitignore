@@ -11,7 +11,17 @@ yarn-error.log*
 .env*.local
 .vercel
 *.tsbuildinfo
-# Large 3D assets are user-supplied; keep the folder, ignore the binaries.
-public/models/*.glb
-public/models/*.gltf
-public/models/*.bin
+# Android / Capacitor build output (the native project itself IS committed)
+android/app/build/
+android/build/
+android/.gradle/
+android/local.properties
+android/app/release/
+*.apk
+*.aab
+*.keystore
+!android/app/src/**
+
+# Static export target for the Capacitor build
+/out
+.api-stash

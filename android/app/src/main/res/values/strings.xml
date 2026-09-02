@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">ALOO</string>
+    <string name="title_activity_main">ALOO</string>
+    <string name="package_name">app.aloo.assistant</string>
+    <string name="custom_url_scheme">app.aloo.assistant</string>
+</resources>

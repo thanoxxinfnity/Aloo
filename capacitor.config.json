@@ -1,0 +1,18 @@
+{
+  "appId": "app.aloo.assistant",
+  "appName": "ALOO",
+  "webDir": "out",
+  "android": {
+    "allowMixedContent": false,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": true
+  },
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    }
+  }
+}

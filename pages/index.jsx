@@ -5,7 +5,7 @@
  *
  *   z-0   WebGL canvas          the avatar + space environment
  *   z-20  SciFiHudOverlay       grid, scanlines, telemetry (pointer-events:none)
- *   z-25  Interactive HUD       chat console, camera tile, quick-action dock
+ *   z-25  Interactive HUD       chat console / mobile sheet, camera tile, dock
  *   z-30  Settings scrim
  *   z-40  Settings drawer
  *
@@ -13,9 +13,11 @@
  * constructs a WebGLRenderer on mount, and there is no WebGL context on the
  * Node server — server-rendering it would throw during the render pass.
  *
- * VIEWPORT MODES change only where the canvas lives, never what it contains,
- * so switching modes never remounts the WebGL context (which would drop the
- * loaded model and reset the camera).
+ * TWO LAYOUTS, ONE STATE. Desktop floats panels in the gutters; a phone has no
+ * gutters, so `MobileShell` puts the same components into a tabbed bottom
+ * sheet. Both read the identical `useAlooBrain` instance, and the WebGL canvas
+ * is mounted once outside the branch — switching orientation must never remount
+ * the GL context, which would drop the loaded model and reset the camera.
  */
 
 import { useCallback, useMemo, useState } from 'react';
@@ -34,14 +36,17 @@ import {
   Loader2,
   Zap,
   AlertTriangle,
+  Square,
   X,
 } from 'lucide-react';
 
 import useAlooBrain from '@/hooks/useAlooBrain';
 import useAssetAvailable from '@/hooks/useAssetAvailable';
+import useIsMobile from '@/hooks/useIsMobile';
 import SciFiHudOverlay from '@/components/ui/SciFiHudOverlay';
 import SettingsDrawer from '@/components/ui/SettingsDrawer';
 import LiveCameraPreview from '@/components/ui/LiveCameraPreview';
+import MobileShell from '@/components/ui/MobileShell';
 import ChatWindow from '@/components/chat/ChatWindow';
 import DeepResearchPanel from '@/components/chat/DeepResearchPanel';
 import { VIEWPORT_MODES, VISION_CAPABLE, activeModel } from '@/lib/settingsStore';
@@ -54,7 +59,7 @@ const AvatarCanvas = dynamic(() => import('@/components/3d/AvatarCanvas'), {
     <div className="flex h-full w-full items-center justify-center">
       <div className="flex flex-col items-center gap-3">
         <Loader2 size={22} className="animate-spin text-cyan-400/70" />
-        <span className="text-[10px] uppercase tracking-[0.3em] text-cyan-300/40">
+        <span className="px-6 text-center text-[10px] uppercase tracking-[0.3em] text-cyan-300/40">
           Initialising holo-projector
         </span>
       </div>
@@ -79,12 +84,34 @@ function DockButton({ icon: Icon, label, active, danger, onClick, disabled, titl
       onClick={onClick}
       disabled={disabled}
       title={title || label}
-      className={`hud-btn flex-col !gap-1 !px-3 !py-2 ${active ? 'hud-btn-active' : ''} ${
+      className={`hud-btn min-h-[44px] flex-col !gap-1 !px-3 !py-2 ${active ? 'hud-btn-active' : ''} ${
         danger ? 'hud-btn-danger' : ''
       }`}
     >
       <Icon size={14} />
       <span className="text-[8px] tracking-[0.1em]">{label}</span>
+    </button>
+  );
+}
+
+/** Compact round control used by the phone's right-edge rail. */
+function RailButton({ icon: Icon, active, danger, onClick, disabled, title }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      aria-label={title}
+      className={`glass flex h-11 w-11 items-center justify-center rounded-full border transition ${
+        danger
+          ? 'border-pink-400/60 bg-pink-400/20 text-pink-100'
+          : active
+          ? 'border-cyan-400/80 bg-cyan-400/25 text-cyan-50 shadow-glow'
+          : 'border-cyan-400/25 text-cyan-200/70'
+      } disabled:opacity-30`}
+    >
+      <Icon size={17} />
     </button>
   );
 }
@@ -121,9 +148,15 @@ export default function AlooViewport() {
     providerLabel,
   } = aloo;
 
+  const isMobile = useIsMobile();
+
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(true);
   const [researchOpen, setResearchOpen] = useState(false);
+
+  // Mobile sheet state.
+  const [sheetTab, setSheetTab] = useState('comms');
+  const [sheetExpanded, setSheetExpanded] = useState(false);
 
   // Probe the avatar GLB once so the canvas can pick GLB vs procedural without
   // ever risking a Suspense throw. See hooks/useAssetAvailable.
@@ -144,13 +177,18 @@ export default function AlooViewport() {
     ? 'STANDBY'
     : 'AWAITING KEY';
 
-  /** Open the research panel automatically when a run starts. */
+  /** Open the research view automatically when a run starts. */
   const onResearch = useCallback(
     (q) => {
-      setResearchOpen(true);
+      if (isMobile) {
+        setSheetTab('deep');
+        setSheetExpanded(true);
+      } else {
+        setResearchOpen(true);
+      }
       runResearch(q);
     },
-    [runResearch]
+    [runResearch, isMobile]
   );
 
   const toggleTts = useCallback(() => {
@@ -169,9 +207,11 @@ export default function AlooViewport() {
         <title>ALOO · Holographic AI Interface</title>
       </Head>
 
-      <main className="relative h-screen w-screen overflow-hidden bg-abyss">
+      {/* 100dvh, not 100vh: mobile browsers count the collapsing address bar in
+          `vh`, which pushes the composer underneath the URL bar on iOS. */}
+      <main className="relative w-screen overflow-hidden bg-abyss" style={{ height: '100dvh' }}>
         {/* ================= LAYER 0 — WebGL ================= */}
-        <div className={`z-0 ${canvasClass}`}>
+        <div className={`z-0 ${isMobile ? 'absolute inset-0' : canvasClass}`}>
           <AvatarCanvas
             settings={settings}
             modelStatus={modelStatus}
@@ -186,6 +226,7 @@ export default function AlooViewport() {
           showGrid={settings.hudGrid}
           showScanlines={settings.hudScanlines}
           showTelemetry={settings.showTelemetry}
+          compact={isMobile}
           telemetry={telemetry}
           status={status}
           provider={providerLabel}
@@ -200,121 +241,184 @@ export default function AlooViewport() {
 
         {/* ================= LAYER 25 — Interactive HUD ================= */}
 
-        {/* --- Top-right controls --- */}
-        <div className="absolute right-4 top-4 z-25 flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setChatOpen((v) => !v)}
-            className={`hud-btn !px-2.5 !py-2 ${chatOpen ? 'hud-btn-active' : ''}`}
-            title="Toggle comms channel"
-          >
-            <MessageSquare size={13} />
-          </button>
+        {/* --- Top-right controls (both layouts) --- */}
+        <div className="absolute right-3 top-3 z-25 flex items-center gap-2 md:right-4 md:top-4">
+          {!isMobile && (
+            <button
+              type="button"
+              onClick={() => setChatOpen((v) => !v)}
+              className={`hud-btn !px-2.5 !py-2 ${chatOpen ? 'hud-btn-active' : ''}`}
+              title="Toggle comms channel"
+            >
+              <MessageSquare size={13} />
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setDrawerOpen(true)}
-            className="hud-btn !px-2.5 !py-2"
+            className="hud-btn min-h-[40px] min-w-[40px] !px-2.5 !py-2"
             title="Open control drawer"
           >
-            <Settings size={13} />
+            <Settings size={15} />
           </button>
         </div>
 
-        {/* --- Camera tile --- */}
-        <LiveCameraPreview
-          className="absolute left-4 z-25 w-40 md:w-48"
-          videoRef={webcam.videoRef}
-          active={webcam.active}
-          enabled={settings.cameraEnabled}
-          error={webcam.error}
-          frameCount={webcam.frameCount}
-          resolution={webcam.resolution}
-          visionReady={visionReady}
-          onDescribe={describeScene}
-          // Sits under the left telemetry column when it is visible.
-          style={{ top: settings.showTelemetry ? '19rem' : '4rem' }}
-        />
+        {isMobile ? (
+          <>
+            {/* --- Phone: right-edge action rail, clear of the sheet --- */}
+            {/* The rail sits clear of the sheet in both snap positions. The
+                collapsed sheet is the tab bar plus the composer (~7.5rem). */}
+            <div
+              className="absolute right-3 z-25 flex flex-col gap-2"
+              style={{ bottom: sheetExpanded ? 'calc(min(68dvh, 620px) + 0.75rem)' : '7.75rem' }}
+            >
+              {/* No mic here — the composer's mic button is always on screen. */}
+              <RailButton
+                icon={settings.ttsEnabled ? Volume2 : VolumeX}
+                active={settings.ttsEnabled}
+                onClick={toggleTts}
+                title="Spoken replies"
+              />
+              <RailButton
+                icon={settings.cameraEnabled ? Video : VideoOff}
+                active={settings.cameraEnabled}
+                onClick={() => set('cameraEnabled', !settings.cameraEnabled)}
+                title="Live camera feed"
+              />
+              {streaming && <RailButton icon={Square} danger onClick={stopAll} title="Stop" />}
+            </div>
 
-        {/* --- Bottom quick-action dock --- */}
-        <div className="absolute bottom-5 left-1/2 z-25 -translate-x-1/2">
-          <div className="glass bracket flex items-center gap-1.5 rounded-xl px-2.5 py-2">
-            <DockButton
-              icon={listening ? Mic : MicOff}
-              label={listening ? 'LIVE' : 'MIC'}
-              active={listening}
-              onClick={toggleVoice}
-              disabled={!sttSupported}
-              title={
-                sttSupported
-                  ? listening
-                    ? 'Stop listening'
-                    : 'Start voice input'
-                  : 'Speech recognition needs Chrome or Edge'
-              }
+            <MobileShell
+              tab={sheetTab}
+              onTabChange={setSheetTab}
+              expanded={sheetExpanded}
+              onToggleExpanded={() => setSheetExpanded((v) => !v)}
+              messages={messages}
+              streaming={streaming}
+              listening={listening}
+              speaking={speaking}
+              interimTranscript={interimTranscript}
+              sttSupported={sttSupported}
+              showVisualizer={settings.showVisualizer}
+              onSend={sendMessage}
+              onResearch={onResearch}
+              onStop={stopAll}
+              onClear={clearConversation}
+              onToggleVoice={toggleVoice}
+              research={research}
+              provider={providerLabel}
+              model={model}
+              connected={hasActiveKey}
+              telemetry={telemetry}
+              riggingReport={riggingReport}
+              cameraActive={webcam.active}
+              webcam={webcam}
+              settings={settings}
+              visionReady={visionReady}
+              onDescribe={describeScene}
             />
-            <DockButton
-              icon={settings.ttsEnabled ? Volume2 : VolumeX}
-              label="VOICE"
-              active={settings.ttsEnabled}
-              onClick={toggleTts}
-              title="Toggle spoken replies"
+          </>
+        ) : (
+          <>
+            {/* --- Desktop: floating camera tile --- */}
+            <LiveCameraPreview
+              className="absolute left-4 z-25 w-40 md:w-48"
+              videoRef={webcam.videoRef}
+              active={webcam.active}
+              enabled={settings.cameraEnabled}
+              error={webcam.error}
+              frameCount={webcam.frameCount}
+              resolution={webcam.resolution}
+              visionReady={visionReady}
+              onDescribe={describeScene}
+              style={{ top: settings.showTelemetry ? '19rem' : '4rem' }}
             />
-            <DockButton
-              icon={settings.cameraEnabled ? Video : VideoOff}
-              label="OPTIC"
-              active={settings.cameraEnabled}
-              onClick={() => set('cameraEnabled', !settings.cameraEnabled)}
-              title="Toggle the live camera feed"
-            />
-            <DockButton
-              icon={Search}
-              label="DEEP"
-              active={researchOpen}
-              onClick={() => setResearchOpen((v) => !v)}
-              title="Toggle the deep research panel"
-            />
-            <span className="mx-1 h-8 w-px bg-cyan-400/15" />
-            <DockButton
-              icon={streaming ? Loader2 : Zap}
-              label={streaming ? 'STOP' : 'READY'}
-              danger={streaming}
-              onClick={streaming ? stopAll : () => setDrawerOpen(true)}
-              title={streaming ? 'Abort the current turn' : 'Open configuration'}
-            />
-          </div>
-        </div>
 
-        {/* --- Comms console --- */}
-        {chatOpen && (
-          <ChatWindow
-            className="absolute bottom-24 right-4 top-16 z-25 w-[min(400px,calc(100vw-2rem))]"
-            messages={messages}
-            streaming={streaming}
-            listening={listening}
-            speaking={speaking}
-            interimTranscript={interimTranscript}
-            sttSupported={sttSupported}
-            showVisualizer={settings.showVisualizer}
-            onSend={sendMessage}
-            onResearch={onResearch}
-            onStop={stopAll}
-            onClear={clearConversation}
-            onToggleVoice={toggleVoice}
-          />
-        )}
+            {/* --- Desktop: bottom dock --- */}
+            <div className="absolute bottom-5 left-1/2 z-25 -translate-x-1/2">
+              <div className="glass bracket flex items-center gap-1.5 rounded-xl px-2.5 py-2">
+                <DockButton
+                  icon={listening ? Mic : MicOff}
+                  label={listening ? 'LIVE' : 'MIC'}
+                  active={listening}
+                  onClick={toggleVoice}
+                  disabled={!sttSupported}
+                  title={
+                    sttSupported
+                      ? listening
+                        ? 'Stop listening'
+                        : 'Start voice input'
+                      : 'Speech recognition needs Chrome or Edge'
+                  }
+                />
+                <DockButton
+                  icon={settings.ttsEnabled ? Volume2 : VolumeX}
+                  label="VOICE"
+                  active={settings.ttsEnabled}
+                  onClick={toggleTts}
+                  title="Toggle spoken replies"
+                />
+                <DockButton
+                  icon={settings.cameraEnabled ? Video : VideoOff}
+                  label="OPTIC"
+                  active={settings.cameraEnabled}
+                  onClick={() => set('cameraEnabled', !settings.cameraEnabled)}
+                  title="Toggle the live camera feed"
+                />
+                <DockButton
+                  icon={Search}
+                  label="DEEP"
+                  active={researchOpen}
+                  onClick={() => setResearchOpen((v) => !v)}
+                  title="Toggle the deep research panel"
+                />
+                <span className="mx-1 h-8 w-px bg-cyan-400/15" />
+                <DockButton
+                  icon={streaming ? Loader2 : Zap}
+                  label={streaming ? 'STOP' : 'READY'}
+                  danger={streaming}
+                  onClick={streaming ? stopAll : () => setDrawerOpen(true)}
+                  title={streaming ? 'Abort the current turn' : 'Open configuration'}
+                />
+              </div>
+            </div>
 
-        {/* --- Deep research panel --- */}
-        {researchOpen && (research.stage || research.report) && (
-          <DeepResearchPanel
-            className="absolute bottom-24 left-4 top-16 z-25 w-[min(420px,calc(100vw-2rem))]"
-            research={research}
-            onClose={() => setResearchOpen(false)}
-          />
+            {/* --- Desktop: comms console --- */}
+            {chatOpen && (
+              <ChatWindow
+                className="absolute bottom-24 right-4 top-16 z-25 w-[min(400px,calc(100vw-2rem))]"
+                messages={messages}
+                streaming={streaming}
+                listening={listening}
+                speaking={speaking}
+                interimTranscript={interimTranscript}
+                sttSupported={sttSupported}
+                showVisualizer={settings.showVisualizer}
+                onSend={sendMessage}
+                onResearch={onResearch}
+                onStop={stopAll}
+                onClear={clearConversation}
+                onToggleVoice={toggleVoice}
+              />
+            )}
+
+            {/* --- Desktop: deep research panel --- */}
+            {researchOpen && (research.stage || research.report) && (
+              <DeepResearchPanel
+                className="absolute bottom-24 left-4 top-16 z-25 w-[min(420px,calc(100vw-2rem))]"
+                research={research}
+                onClose={() => setResearchOpen(false)}
+              />
+            )}
+          </>
         )}
 
         {/* --- First-run key prompt --- */}
         {!hasActiveKey && (
-          <div className="absolute left-1/2 top-1/2 z-25 w-[min(430px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2">
+          <div
+            className="absolute left-1/2 z-25 w-[min(430px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2"
+            style={{ top: isMobile ? '34%' : '50%' }}
+          >
             <div className="glass-strong bracket rounded-xl p-5 text-center">
               <div className="mb-2 text-[11px] uppercase tracking-[0.32em] text-cyan-200/80">
                 Neural Link Offline
@@ -325,7 +429,11 @@ export default function AlooViewport() {
                 <span className="text-cyan-300">NVIDIA NIM</span> in the control drawer — it is stored
                 only in this browser.
               </p>
-              <button type="button" onClick={() => setDrawerOpen(true)} className="hud-btn hud-btn-active mx-auto">
+              <button
+                type="button"
+                onClick={() => setDrawerOpen(true)}
+                className="hud-btn hud-btn-active mx-auto min-h-[44px]"
+              >
                 <Settings size={12} />
                 Open Control Drawer
               </button>
@@ -335,7 +443,10 @@ export default function AlooViewport() {
 
         {/* --- Error toast --- */}
         {error && (
-          <div className="absolute bottom-24 left-1/2 z-30 w-[min(460px,calc(100vw-2rem))] -translate-x-1/2">
+          <div
+            className="absolute left-1/2 z-30 w-[min(460px,calc(100vw-1.5rem))] -translate-x-1/2"
+            style={{ bottom: isMobile ? 'calc(5.5rem + env(safe-area-inset-bottom))' : '6rem' }}
+          >
             <div className="glass-strong flex items-start gap-2 rounded-lg border-pink-400/35 p-3">
               <AlertTriangle size={13} className="mt-0.5 shrink-0 text-pink-400" />
               <span className="flex-1 text-[11px] leading-relaxed text-pink-100/85">{error}</span>

@@ -16,6 +16,53 @@
 
 import { readSSE, describeHttpError } from '@/lib/sseStream';
 import { getSettings } from '@/lib/settingsStore';
+import { isNative, supportsStreaming, GEMINI_DIRECT_BASE } from '@/lib/runtime';
+
+/** Safety thresholds, mirrored from the proxy so the native path behaves the same. */
+const SAFETY = [
+  'HARM_CATEGORY_HARASSMENT',
+  'HARM_CATEGORY_HATE_SPEECH',
+  'HARM_CATEGORY_SEXUALLY_EXPLICIT',
+  'HARM_CATEGORY_DANGEROUS_CONTENT',
+].map((category) => ({ category, threshold: 'BLOCK_ONLY_HIGH' }));
+
+/**
+ * Native talks to Google directly (Capacitor's native HTTP bridge is not
+ * subject to CORS); web goes through our edge proxy so the key never lands in
+ * a browser-visible URL.
+ */
+function geminiRequest(s, { stream, contents, systemPrompt, temperature, maxOutputTokens }) {
+  if (isNative()) {
+    const method = stream ? 'streamGenerateContent' : 'generateContent';
+    return {
+      url:
+        `${GEMINI_DIRECT_BASE}/models/${encodeURIComponent(s.geminiModel)}:${method}` +
+        `?key=${encodeURIComponent(s.geminiApiKey)}${stream ? '&alt=sse' : ''}`,
+      headers: { 'Content-Type': 'application/json' },
+      body: {
+        contents,
+        generationConfig: { temperature, maxOutputTokens, topP: 0.95 },
+        safetySettings: SAFETY,
+        ...(systemPrompt ? { systemInstruction: { parts: [{ text: systemPrompt }] } } : {}),
+      },
+    };
+  }
+  return {
+    url: '/api/gemini/chat',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(s.geminiApiKey ? { 'x-gemini-api-key': s.geminiApiKey } : {}),
+    },
+    body: {
+      model: s.geminiModel,
+      contents,
+      systemInstruction: systemPrompt,
+      temperature,
+      maxOutputTokens,
+      stream,
+    },
+  };
+}
 
 /** Strip a data-URI prefix, returning { mimeType, data } for inlineData. */
 export function dataUrlToInlinePart(dataUrl) {
@@ -55,21 +102,27 @@ export function toGeminiContents(messages) {
 export async function streamGeminiChat({ messages, onToken, signal, overrides = {} }) {
   const s = { ...getSettings(), ...overrides };
 
-  const res = await fetch('/api/gemini/chat', {
+  // The native HTTP bridge buffers responses — deliver one whole reply instead
+  // of faking a stream.
+  if (!supportsStreaming()) {
+    const full = await completeGemini({ messages, overrides });
+    onToken?.(full, full);
+    return full;
+  }
+
+  const req = geminiRequest(s, {
+    stream: true,
+    contents: toGeminiContents(messages),
+    systemPrompt: s.systemPrompt,
+    temperature: s.temperature,
+    maxOutputTokens: s.maxTokens,
+  });
+
+  const res = await fetch(req.url, {
     method: 'POST',
     signal,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(s.geminiApiKey ? { 'x-gemini-api-key': s.geminiApiKey } : {}),
-    },
-    body: JSON.stringify({
-      model: s.geminiModel,
-      contents: toGeminiContents(messages),
-      systemInstruction: s.systemPrompt,
-      temperature: s.temperature,
-      maxOutputTokens: s.maxTokens,
-      stream: true,
-    }),
+    headers: req.headers,
+    body: JSON.stringify(req.body),
   });
 
   if (!res.ok) throw new Error(await describeHttpError(res));
@@ -101,20 +154,22 @@ export async function streamGeminiChat({ messages, onToken, signal, overrides = 
 export async function completeGemini({ messages, overrides = {} }) {
   const s = { ...getSettings(), ...overrides };
 
-  const res = await fetch('/api/gemini/chat', {
+  if (isNative() && !s.geminiApiKey) {
+    throw new Error('No Gemini API key. Add one in Settings → API Keys.');
+  }
+
+  const req = geminiRequest(s, {
+    stream: false,
+    contents: toGeminiContents(messages),
+    systemPrompt: overrides.systemPrompt ?? s.systemPrompt,
+    temperature: overrides.temperature ?? s.temperature,
+    maxOutputTokens: overrides.maxTokens ?? s.maxTokens,
+  });
+
+  const res = await fetch(req.url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(s.geminiApiKey ? { 'x-gemini-api-key': s.geminiApiKey } : {}),
-    },
-    body: JSON.stringify({
-      model: s.geminiModel,
-      contents: toGeminiContents(messages),
-      systemInstruction: overrides.systemPrompt ?? s.systemPrompt,
-      temperature: overrides.temperature ?? s.temperature,
-      maxOutputTokens: overrides.maxTokens ?? s.maxTokens,
-      stream: false,
-    }),
+    headers: req.headers,
+    body: JSON.stringify(req.body),
   });
 
   if (!res.ok) throw new Error(await describeHttpError(res));

@@ -2,14 +2,19 @@
   "name": "project-aloo",
   "version": "1.0.0",
   "private": true,
-  "description": "ALOO — Year 2100 3D interactive AI assistant (WebGL avatar, voice, vision, multi-LLM routing).",
+  "description": "ALOO \u2014 Year 2100 3D interactive AI assistant (WebGL avatar, voice, vision, multi-LLM routing).",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "build:static": "node scripts/build-static.mjs",
+    "android:sync": "node scripts/build-static.mjs && npx cap sync android",
+    "android:apk": "node scripts/build-static.mjs && npx cap sync android && cd android && ./gradlew assembleDebug"
   },
   "dependencies": {
+    "@capacitor/android": "^6.2.2",
+    "@capacitor/core": "^6.2.2",
     "@react-three/drei": "^9.114.3",
     "@react-three/fiber": "^8.17.10",
     "lucide-react": "^0.454.0",
@@ -19,6 +24,7 @@
     "three": "^0.169.0"
   },
   "devDependencies": {
+    "@capacitor/cli": "^6.2.2",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.14"

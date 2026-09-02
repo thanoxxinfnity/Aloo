@@ -307,7 +307,7 @@ export default function SettingsDrawer({
       />
 
       <aside
-        className={`glass-strong fixed right-0 top-0 z-40 flex h-full w-full max-w-[390px] flex-col
+        className={`glass-strong fixed right-0 top-0 z-40 flex h-[100dvh] w-full flex-col sm:max-w-[400px]
                     border-l border-cyan-400/25 transition-transform duration-300 ease-out ${
                       open ? 'translate-x-0' : 'translate-x-full'
                     }`}
@@ -651,6 +651,37 @@ export default function SettingsDrawer({
               </select>
             </Field>
 
+            <Toggle
+              label="Auto-Fit Model"
+              checked={settings.autoFit}
+              onChange={(v) => set('autoFit', v)}
+              hint="Measures the imported model on load and normalises it to the target height with its feet on the floor. Turn off only to place a model by hand."
+            />
+            <Slider
+              label="Target Height"
+              value={settings.avatarTargetHeight}
+              min={0.8}
+              max={3}
+              step={0.02}
+              onChange={(v) => set('avatarTargetHeight', v)}
+              format={(v) => `${v.toFixed(2)} m`}
+            />
+            <Toggle
+              label="Auto A-Pose"
+              checked={settings.autoAPose}
+              onChange={(v) => set('autoAPose', v)}
+              hint="Rotates the upper-arm bones down out of the T-pose when the model ships no idle animation."
+            />
+            <Slider
+              label="Arm Rest Angle"
+              value={settings.aPoseAngle}
+              min={0}
+              max={90}
+              step={1}
+              onChange={(v) => set('aPoseAngle', v)}
+              format={(v) => `${v}°`}
+            />
+
             <Slider
               label="Avatar Scale"
               value={settings.avatarScale}
@@ -769,6 +800,52 @@ export default function SettingsDrawer({
               step={100}
               onChange={(v) => set('particleDensity', v)}
             />
+
+            <div className="rounded border border-cyan-400/12 bg-black/25 p-2">
+              <span className="hud-label mb-1.5 block">Environment Placement</span>
+              <div className="space-y-2">
+                <Slider
+                  label="Size"
+                  value={settings.spaceFitRadius}
+                  min={20}
+                  max={300}
+                  step={5}
+                  onChange={(v) => set('spaceFitRadius', v)}
+                  format={(v) => `${v} m`}
+                />
+                <Slider
+                  label="Distance"
+                  value={-settings.spaceOffsetZ}
+                  min={20}
+                  max={500}
+                  step={5}
+                  onChange={(v) => set('spaceOffsetZ', -v)}
+                  format={(v) => `${v} m`}
+                />
+                <Slider
+                  label="Height"
+                  value={settings.spaceOffsetY}
+                  min={-100}
+                  max={150}
+                  step={2}
+                  onChange={(v) => set('spaceOffsetY', v)}
+                  format={(v) => `${v} m`}
+                />
+                <Slider
+                  label="Tilt"
+                  value={settings.spaceTilt}
+                  min={-90}
+                  max={90}
+                  step={1}
+                  onChange={(v) => set('spaceTilt', v)}
+                  format={(v) => `${v}°`}
+                />
+              </div>
+              <p className="mt-1.5 text-[9px] leading-relaxed text-cyan-300/30">
+                The bundled environment is a galaxy disc, not a skybox — it is placed behind the
+                avatar rather than wrapped around the camera.
+              </p>
+            </div>
 
             <Field label="Avatar Model URL" hint="Relative to /public, or an absolute https URL.">
               <input

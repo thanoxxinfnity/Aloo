@@ -193,6 +193,11 @@ export default function ChatWindow({
   onToggleVoice,
   showVisualizer = true,
   className = '',
+  // The mobile sheet supplies its own frame and tab bar, so it turns off this
+  // component's header/border; `composerOnly` renders just the input row for
+  // the collapsed sheet, keeping one send path instead of a second copy.
+  chrome = true,
+  composerOnly = false,
 }) {
   const [draft, setDraft] = useState('');
   const scrollRef = useRef(null);
@@ -237,9 +242,82 @@ export default function ChatWindow({
     ? 'thinking'
     : 'idle';
 
+  const composer = (
+    <div className="border-t border-cyan-400/15 p-2.5" style={{ paddingBottom: 'max(0.625rem, env(safe-area-inset-bottom))' }}>
+      <div className="flex items-end gap-2">
+        {sttSupported && (
+          <button
+            type="button"
+            onClick={onToggleVoice}
+            // 44px minimum: anything smaller is unreliable under a thumb.
+            className={`hud-btn min-h-[44px] min-w-[44px] !px-2.5 !py-2.5 ${
+              listening ? 'hud-btn-active' : ''
+            }`}
+            title={listening ? 'Stop listening' : 'Start voice input'}
+          >
+            {listening ? <Mic size={15} className="animate-pulse" /> : <MicOff size={15} />}
+          </button>
+        )}
+
+        <textarea
+          ref={inputRef}
+          rows={1}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder={listening ? 'Listening…' : 'Transmit a message…'}
+          // 16px on mobile: iOS Safari zooms the whole page for anything smaller.
+          className="hud-input max-h-28 min-h-[44px] flex-1 resize-none py-2.5 text-[16px] leading-snug md:text-[12px]"
+        />
+
+        <button
+          type="button"
+          onClick={() => submit('research')}
+          disabled={!draft.trim() || streaming}
+          className="hud-btn min-h-[44px] min-w-[44px] !px-2.5 !py-2.5"
+          title="Deep research (Ctrl+Enter) — plans sub-queries, searches the web, then synthesises with citations"
+        >
+          <Search size={15} />
+        </button>
+
+        <button
+          type="button"
+          onClick={() => submit('chat')}
+          disabled={!draft.trim() || streaming}
+          className="hud-btn hud-btn-active min-h-[44px] min-w-[44px] !px-2.5 !py-2.5 disabled:!bg-cyan-400/5 disabled:!shadow-none"
+          title="Send (Enter)"
+        >
+          {streaming ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
+        </button>
+
+        {composerOnly && streaming && (
+          <button type="button" onClick={onStop} className="hud-btn hud-btn-danger min-h-[44px] min-w-[44px] !px-2.5 !py-2.5" title="Stop">
+            <Square size={14} />
+          </button>
+        )}
+      </div>
+
+      {!composerOnly && (
+        <div className="mt-1.5 hidden items-center justify-between px-0.5 md:flex">
+          <span className="text-[9px] tracking-wider text-cyan-300/25">
+            ENTER send · SHIFT+ENTER newline · CTRL+ENTER deep research
+          </span>
+          <span className="text-[9px] tracking-wider text-cyan-300/25">{draft.length}</span>
+        </div>
+      )}
+    </div>
+  );
+
+  if (composerOnly) return <div className={className}>{composer}</div>;
+
   return (
-    <div className={`glass bracket flex flex-col overflow-hidden rounded-xl ${className}`}>
+    <div
+      className={`flex flex-col overflow-hidden ${
+        chrome ? 'glass bracket rounded-xl' : ''
+      } ${className}`}
+    >
       {/* ---- Header ---- */}
+      {chrome && (
       <div className="flex items-center justify-between border-b border-cyan-400/15 px-3 py-2">
         <div className="flex items-center gap-2">
           <span className={`status-dot ${streaming ? 'bg-amber-400' : 'bg-cyan-400'} animate-pulse`} />
@@ -261,6 +339,7 @@ export default function ChatWindow({
           </button>
         </div>
       </div>
+      )}
 
       {/* ---- Stream ---- */}
       <div
@@ -293,58 +372,7 @@ export default function ChatWindow({
       )}
 
       {/* ---- Composer ---- */}
-      <div className="border-t border-cyan-400/15 p-2.5">
-        <div className="flex items-end gap-2">
-          {sttSupported && (
-            <button
-              type="button"
-              onClick={onToggleVoice}
-              className={`hud-btn !px-2.5 !py-2.5 ${listening ? 'hud-btn-active' : ''}`}
-              title={listening ? 'Stop listening' : 'Start voice input'}
-            >
-              {listening ? <Mic size={13} className="animate-pulse" /> : <MicOff size={13} />}
-            </button>
-          )}
-
-          <textarea
-            ref={inputRef}
-            rows={1}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={onKeyDown}
-            placeholder={listening ? 'Listening…' : 'Transmit a message…'}
-            className="hud-input max-h-28 min-h-[38px] flex-1 resize-none py-2.5 leading-snug"
-            style={{ height: 'auto' }}
-          />
-
-          <button
-            type="button"
-            onClick={() => submit('research')}
-            disabled={!draft.trim() || streaming}
-            className="hud-btn !px-2.5 !py-2.5"
-            title="Deep research (Ctrl+Enter) — plans sub-queries, searches the web, then synthesises with citations"
-          >
-            <Search size={13} />
-          </button>
-
-          <button
-            type="button"
-            onClick={() => submit('chat')}
-            disabled={!draft.trim() || streaming}
-            className="hud-btn hud-btn-active !px-2.5 !py-2.5 disabled:!bg-cyan-400/5 disabled:!shadow-none"
-            title="Send (Enter)"
-          >
-            {streaming ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />}
-          </button>
-        </div>
-
-        <div className="mt-1.5 flex items-center justify-between px-0.5">
-          <span className="text-[9px] tracking-wider text-cyan-300/25">
-            ENTER send · SHIFT+ENTER newline · CTRL+ENTER deep research
-          </span>
-          <span className="text-[9px] tracking-wider text-cyan-300/25">{draft.length}</span>
-        </div>
-      </div>
+      {composer}
     </div>
   );
 }

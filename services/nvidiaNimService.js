@@ -15,6 +15,32 @@
 
 import { readSSE, describeHttpError } from '@/lib/sseStream';
 import { getSettings } from '@/lib/settingsStore';
+import { isNative, supportsStreaming, NIM_DIRECT_URL } from '@/lib/runtime';
+
+/**
+ * Where to POST, and with which headers.
+ *  web    -> our own edge proxy (CORS + key hygiene + SSE passthrough)
+ *  native -> the provider directly, through Capacitor's native HTTP bridge
+ */
+function nimEndpoint(s) {
+  if (isNative()) {
+    return {
+      url: NIM_DIRECT_URL,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${s.nvidiaApiKey}`,
+      },
+    };
+  }
+  return {
+    url: '/api/nim/chat',
+    headers: {
+      'Content-Type': 'application/json',
+      // Bring-your-own-key: only sent to our own origin, never cross-origin.
+      ...(s.nvidiaApiKey ? { 'x-nvidia-api-key': s.nvidiaApiKey } : {}),
+    },
+  };
+}
 
 /** Convert ALOO's internal message shape into NIM/OpenAI messages. */
 export function toNimMessages(messages, systemPrompt) {
@@ -47,14 +73,19 @@ export function toNimMessages(messages, systemPrompt) {
 export async function streamNimChat({ messages, onToken, signal, overrides = {} }) {
   const s = { ...getSettings(), ...overrides };
 
-  const res = await fetch('/api/nim/chat', {
+  // The native bridge buffers responses, so ask for a whole reply there and
+  // hand it to the caller in one delivery rather than pretending to stream.
+  if (!supportsStreaming()) {
+    const full = await completeNim({ messages, overrides });
+    onToken?.(full, full);
+    return full;
+  }
+
+  const { url, headers } = nimEndpoint(s);
+  const res = await fetch(url, {
     method: 'POST',
     signal,
-    headers: {
-      'Content-Type': 'application/json',
-      // Bring-your-own-key: only sent to our own origin, never cross-origin.
-      ...(s.nvidiaApiKey ? { 'x-nvidia-api-key': s.nvidiaApiKey } : {}),
-    },
+    headers,
     body: JSON.stringify({
       model: s.nvidiaModel,
       messages: toNimMessages(messages, s.systemPrompt),
@@ -86,12 +117,14 @@ export async function streamNimChat({ messages, onToken, signal, overrides = {} 
 export async function completeNim({ messages, overrides = {} }) {
   const s = { ...getSettings(), ...overrides };
 
-  const res = await fetch('/api/nim/chat', {
+  if (isNative() && !s.nvidiaApiKey) {
+    throw new Error('No NVIDIA NIM API key. Add one in Settings → API Keys.');
+  }
+
+  const { url, headers } = nimEndpoint(s);
+  const res = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(s.nvidiaApiKey ? { 'x-nvidia-api-key': s.nvidiaApiKey } : {}),
-    },
+    headers,
     body: JSON.stringify({
       model: s.nvidiaModel,
       messages: toNimMessages(messages, overrides.systemPrompt ?? s.systemPrompt),

@@ -1,0 +1,47 @@
+name: Build Android APK
+
+# Rebuilds the debug APK whenever the app changes, and attaches it to the run
+# so it can be downloaded without a local Android toolchain.
+on:
+  push:
+    branches: ['**']
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Exports the static bundle to ./out, then copies it into the native
+      # project. scripts/build-static.mjs moves pages/api aside for the export
+      # and restores it afterwards — see the comment at the top of that file.
+      - name: Build web bundle and sync Capacitor
+        run: npm run android:sync
+
+      - name: Assemble debug APK
+        run: ./gradlew assembleDebug --no-daemon
+        working-directory: android
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aloo-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

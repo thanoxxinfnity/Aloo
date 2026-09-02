@@ -17,6 +17,8 @@
 
 import { complete, streamChat } from './aiRouter';
 import { getSettings } from '@/lib/settingsStore';
+import { isNative } from '@/lib/runtime';
+import { searchWeb, readPageText } from '@/lib/searchProviders';
 
 /** Ask the model for sub-queries; fall back to heuristics if it misbehaves. */
 export async function planQueries(question, depth = 3) {
@@ -63,7 +65,15 @@ function extractJsonArray(text) {
   }
 }
 
+/**
+ * On the web the browser cannot reach search engines (no CORS), so the request
+ * goes to our edge route. In the Android build there is no server, but
+ * Capacitor's native HTTP bridge is not subject to CORS — so the very same
+ * provider code runs in-process instead.
+ */
 async function runSearch(query, maxResults, tavilyApiKey, signal) {
+  if (isNative()) return searchWeb(query, maxResults, tavilyApiKey);
+
   const res = await fetch('/api/search', {
     method: 'POST',
     signal,
@@ -79,6 +89,8 @@ async function runSearch(query, maxResults, tavilyApiKey, signal) {
 
 async function readPage(url, signal) {
   try {
+    if (isNative()) return (await readPageText(url)).text || '';
+
     const res = await fetch('/api/search', {
       method: 'POST',
       signal,

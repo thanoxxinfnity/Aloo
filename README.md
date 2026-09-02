@@ -17,6 +17,12 @@ npm install
 npm run dev          # http://localhost:3000
 ```
 
+Or build the Android app:
+
+```bash
+npm run android:apk  # -> android/app/build/outputs/apk/debug/app-debug.apk
+```
+
 Then open the **control drawer** (gear, top right) → **API Keys** and paste at
 least one key:
 
@@ -42,6 +48,63 @@ A request that arrives without a client key falls back to these.
 ```bash
 npm run build && npm start
 ```
+
+---
+
+## Android APK
+
+ALOO ships as a Capacitor app as well as a website. Everything — the 3D avatar,
+the galaxy, both bundled models — is baked into the APK, so it runs without a
+server.
+
+```bash
+npm run android:apk
+```
+
+Output: `android/app/build/outputs/apk/debug/app-debug.apk` (~10 MB). Push it
+with `adb install -r <path>`, or side-load it directly. CI builds it too — see
+`.github/workflows/android-apk.yml`, which uploads the APK as a run artifact.
+
+### How the native build differs
+
+| | Web | Android APK |
+|---|---|---|
+| Reaches providers via | `/api/*` edge routes on this origin | direct calls through Capacitor's native HTTP bridge |
+| CORS | solved by the proxy | not applicable — native HTTP is not subject to it |
+| Token streaming | ✅ live SSE | ❌ the bridge buffers; replies arrive whole |
+| Speech **input** | ✅ Chrome/Edge | ❌ Android WebView does not expose the Web Speech API |
+| Speech **output**, lip-sync, vision, deep research, 3D | ✅ | ✅ |
+
+`lib/runtime.js` detects which shell it is running in and picks the endpoints;
+nothing above the service layer knows the difference. The mic control hides
+itself where speech input is unavailable rather than failing at tap time.
+
+The static export needs one wrinkle: `output: 'export'` refuses to build while
+API routes exist, and the web build genuinely needs them. `scripts/build-static.mjs`
+moves `pages/api` aside for the export and restores it in a `finally` plus
+signal handlers, so an interrupted build cannot leave the repo without its
+routes.
+
+---
+
+## Mobile layout
+
+Below 768px the interface switches from floating panels to a tabbed bottom
+sheet, because a phone has no gutters for panels to float in:
+
+- **COMMS** — conversation and composer
+- **DEEP** — the research pipeline and its sources
+- **DATA** — every telemetry card from the desktop gutters (neural core, rig
+  diagnostics with the full log, camera telemetry, subsystems) plus the camera
+  preview
+
+Nothing is dropped on mobile; the DATA tab exists precisely so the diagnostics
+stay reachable at 390px. The sheet has two snap positions rather than free
+dragging — a drag gesture on top of a WebGL canvas fights OrbitControls for the
+same touch events. Voice, speaker and camera toggles live on a thumb-reachable
+right-edge rail, tap targets are ≥44px, the composer uses 16px text (anything
+smaller makes iOS Safari zoom the page), and the layout is sized in `dvh` so the
+collapsing address bar cannot hide the input.
 
 ---
 
@@ -184,7 +247,7 @@ Drop files into `public/models/`:
 | File | Purpose |
 |---|---|
 | `avatar.glb` | Foreground character. Needs a skeleton; visemes strongly recommended. |
-| `space.glb` | Background environment. Rendered at 60× scale with `depthWrite` off. |
+| `space.glb` | Background environment. Auto-recentred and placed behind the avatar. |
 
 Both paths are editable in **Settings → Holographic Projection** (a remote
 `https://` URL works too). Draco-compressed GLBs are supported.
@@ -233,12 +296,17 @@ itself where it is unavailable rather than failing at click time.
 components/
   3d/      AvatarCanvas · SpaceBackground · CameraController · RiggingValidator
   ui/      SciFiHudOverlay · SettingsDrawer · AudioVisualizer · LiveCameraPreview
+           MobileShell
   chat/    ChatWindow · DeepResearchPanel
 services/  nvidiaNimService · geminiService · aiRouter · researchService
            sttService · ttsLipSyncService
-hooks/     useAlooBrain · useWebcam · useSettings · useAssetAvailable
-lib/       settingsStore · audioGraph · sseStream · markdown
-pages/     index.jsx · _app.jsx · api/nim/chat · api/gemini/chat · api/search
+hooks/     useAlooBrain · useWebcam · useSettings · useAssetAvailable · useIsMobile
+lib/       settingsStore · audioGraph · sseStream · markdown · runtime
+           searchProviders
+pages/     index.jsx · _app.jsx · _document.jsx
+           api/nim/chat · api/gemini/chat · api/search
+scripts/   build-static.mjs
+android/   Capacitor native project
 ```
 
 ---

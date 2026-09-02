@@ -26,7 +26,7 @@ import useAssetAvailable from '@/hooks/useAssetAvailable';
 /* A) User-supplied space.glb                                                  */
 /* -------------------------------------------------------------------------- */
 
-function SpaceModel({ url, rotationSpeed, opacity }) {
+function SpaceModel({ url, rotationSpeed, opacity, fitRadius, offsetY, offsetZ, tilt }) {
   const gltf = useLoader(GLTFLoader, url);
   const group = useRef();
 
@@ -36,13 +36,18 @@ function SpaceModel({ url, rotationSpeed, opacity }) {
     clone.traverse((node) => {
       if (!node.isMesh) return;
       node.frustumCulled = false;
-      // A backdrop must never occlude the avatar, whatever its authored scale.
       const mats = Array.isArray(node.material) ? node.material : [node.material];
       mats.forEach((m) => {
         if (!m) return;
+        // A backdrop must never occlude the avatar or write into the depth
+        // buffer, whatever its authored scale.
         m.depthWrite = false;
-        m.side = THREE.BackSide;
+        // DoubleSide, not BackSide: this has to work both for a skybox sphere
+        // viewed from the inside AND for an ordinary model placed behind the
+        // camera target. BackSide would render an open model inside-out.
+        m.side = THREE.DoubleSide;
         m.toneMapped = false;
+        m.fog = false;
         if (opacity < 1) {
           m.transparent = true;
           m.opacity = opacity;
@@ -53,13 +58,41 @@ function SpaceModel({ url, rotationSpeed, opacity }) {
     return clone;
   }, [gltf, opacity]);
 
+  /* ---- Auto-fit -------------------------------------------------------------
+     Exported environment models are rarely centred on the origin — this
+     project's space model spans x -58..289, y -82..313. Dropped in as-is it
+     would sit entirely off to one side of the avatar. We measure the bounding
+     box, recentre it, and scale the largest axis to `fitRadius` so it always
+     forms a shell around the scene. */
+  const fit = useMemo(() => {
+    const box = new THREE.Box3().setFromObject(scene);
+    const size = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    box.getSize(size);
+    box.getCenter(center);
+    const maxDim = Math.max(size.x, size.y, size.z);
+    if (!Number.isFinite(maxDim) || maxDim <= 0) {
+      return { scale: 1, offset: [0, 0, 0] };
+    }
+    const k = (fitRadius * 2) / maxDim;
+    return { scale: k, offset: [-center.x * k, -center.y * k, -center.z * k] };
+  }, [scene, fitRadius]);
+
   useFrame((_, delta) => {
     if (group.current) group.current.rotation.y += rotationSpeed * delta;
   });
 
   return (
-    <group ref={group}>
-      <primitive object={scene} scale={60} />
+    // Outer group: placement in the scene (pushed back, lifted, tilted so the
+    // disc is seen at an angle instead of edge-on).
+    <group position={[0, offsetY, offsetZ]} rotation={[THREE.MathUtils.degToRad(tilt), 0, 0]}>
+      {/* Middle group spins slowly on the disc's own axis. */}
+      <group ref={group}>
+        {/* Inner group carries the measured normalisation. */}
+        <group position={fit.offset} scale={fit.scale}>
+          <primitive object={scene} />
+        </group>
+      </group>
     </group>
   );
 }
@@ -168,7 +201,7 @@ function DustField({ count, rotationSpeed }) {
   );
 }
 
-function ProceduralSpace({ rotationSpeed, particleDensity }) {
+function ProceduralSpace({ rotationSpeed, particleDensity, horizonShell = true, nebulae = true }) {
   const group = useRef();
 
   useFrame((_, delta) => {
@@ -186,15 +219,22 @@ function ProceduralSpace({ rotationSpeed, particleDensity }) {
       {/* Glowing motes near the avatar — foreground depth cue. */}
       <Sparkles count={90} scale={[14, 8, 14]} size={2.6} speed={0.32} opacity={0.5} color="#38bdf8" />
 
-      <Nebula color="#4f46e5" position={[-26, 8, -40]} scale={44} speed={0.02} />
-      <Nebula color="#0ea5e9" position={[30, -4, -46]} scale={38} speed={-0.017} />
-      <Nebula color="#a21caf" position={[6, 18, -55]} scale={30} speed={0.012} />
+      {nebulae && (
+        <>
+          <Nebula color="#4f46e5" position={[-26, 8, -40]} scale={44} speed={0.02} />
+          <Nebula color="#0ea5e9" position={[30, -4, -46]} scale={38} speed={-0.017} />
+          <Nebula color="#a21caf" position={[6, 18, -55]} scale={30} speed={0.012} />
+        </>
+      )}
 
-      {/* A dark shell closes the horizon so the void never shows the clear colour. */}
-      <mesh renderOrder={-20}>
-        <sphereGeometry args={[140, 32, 32]} />
-        <meshBasicMaterial color="#05070f" side={THREE.BackSide} depthWrite={false} fog={false} />
-      </mesh>
+      {/* A dark shell closes the horizon so the void never shows the clear
+          colour — omitted when a real environment model supplies the horizon. */}
+      {horizonShell && (
+        <mesh renderOrder={-20}>
+          <sphereGeometry args={[140, 32, 32]} />
+          <meshBasicMaterial color="#05070f" side={THREE.BackSide} depthWrite={false} fog={false} />
+        </mesh>
+      )}
     </group>
   );
 }
@@ -206,18 +246,38 @@ export default function SpaceBackground({
   rotationSpeed = 0.015,
   particleDensity = 1400,
   opacity = 1,
+  fitRadius = 95,
+  offsetY = 14,
+  offsetZ = -190,
+  tilt = 24,
 }) {
   const status = useAssetAvailable(url);
+  const hasModel = status === 'available';
 
   return (
     <group>
-      {/* The procedural layer always renders: it is both the fallback and the
-          particle/atmosphere pass that sits on top of a user-supplied GLB. */}
-      <ProceduralSpace rotationSpeed={rotationSpeed} particleDensity={particleDensity} />
+      {/* The procedural layer always renders: it is both the zero-asset fallback
+          AND the particle/atmosphere pass layered on top of a supplied GLB.
+          Its opaque horizon shell is dropped when a real model is present,
+          since that shell would sit in front of the environment. */}
+      <ProceduralSpace
+        rotationSpeed={rotationSpeed}
+        particleDensity={hasModel ? Math.round(particleDensity * 0.45) : particleDensity}
+        horizonShell={!hasModel}
+        nebulae={!hasModel}
+      />
 
-      {status === 'available' && (
+      {hasModel && (
         <Suspense fallback={null}>
-          <SpaceModel url={url} rotationSpeed={rotationSpeed} opacity={opacity} />
+          <SpaceModel
+            url={url}
+            rotationSpeed={rotationSpeed}
+            opacity={opacity}
+            fitRadius={fitRadius}
+            offsetY={offsetY}
+            offsetZ={offsetZ}
+            tilt={tilt}
+          />
         </Suspense>
       )}
     </group>
