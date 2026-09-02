@@ -33,7 +33,13 @@ import {
   XCircle,
   ExternalLink,
   Volume2,
+  Upload,
+  Link2,
+  Trash2,
+  Library,
+  Lock,
 } from 'lucide-react';
+import { SKETCHFAB_CATALOG } from '@/lib/modelLibrary';
 
 import {
   PROVIDERS,
@@ -273,6 +279,105 @@ function DiagnosticsPanel({ report, modelStatus, avatarUrl }) {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Model library                                                               */
+/* -------------------------------------------------------------------------- */
+
+function ModelPicker({ label, kind, entries, selectedId, onSelect, onRemove }) {
+  const selected = entries.find((e) => e.id === selectedId) || entries[0];
+  return (
+    <div>
+      <Field label={label}>
+        <select className="hud-select" value={selected?.id || ''} onChange={(e) => onSelect(e.target.value)}>
+          {entries.map((e) => (
+            <option key={e.id} value={e.id}>
+              {e.label}
+              {e.builtin ? '' : e.source === 'upload' ? '  · on device' : '  · remote'}
+            </option>
+          ))}
+        </select>
+      </Field>
+      {selected && (
+        <div className="mt-1 flex items-start justify-between gap-2">
+          <span className="text-[9px] leading-tight text-cyan-300/35">
+            {selected.note ||
+              (selected.size ? `${(selected.size / 1048576).toFixed(1)} MB stored on this device` : selected.url)}
+          </span>
+          {!selected.builtin && (
+            <button
+              type="button"
+              onClick={() => onRemove(selected.id)}
+              title="Remove from library"
+              className="shrink-0 rounded p-1 text-pink-300/50 transition hover:bg-pink-400/10 hover:text-pink-200"
+            >
+              <Trash2 size={11} />
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AddModelRow({ kind, onUpload, onAddUrl }) {
+  const [url, setUrl] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const pick = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-picking the same file after a failure
+    if (!file) return;
+    setBusy(true);
+    try {
+      await onUpload(file, kind);
+    } catch {
+      /* the hook surfaces the message */
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitUrl = async () => {
+    if (!url.trim()) return;
+    setBusy(true);
+    try {
+      await onAddUrl(url, kind);
+      setUrl('');
+    } catch {
+      /* the hook surfaces the message */
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-1.5 rounded border border-cyan-400/12 bg-black/25 p-2">
+      <label
+        className={`hud-btn w-full cursor-pointer ${busy ? 'opacity-50' : ''}`}
+        title="Pick a .glb from this device — it is stored locally and works offline"
+      >
+        <Upload size={11} />
+        Add {kind === 'avatar' ? 'avatar' : 'environment'} from device
+        <input type="file" accept=".glb,.gltf,model/gltf-binary" className="hidden" onChange={pick} disabled={busy} />
+      </label>
+
+      <div className="flex gap-1.5">
+        <input
+          className="hud-input flex-1 !py-1.5 text-[11px]"
+          placeholder="…or paste an https URL to a .glb"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && submitUrl()}
+          spellCheck={false}
+        />
+        <button type="button" onClick={submitUrl} disabled={busy || !url.trim()} className="hud-btn !px-2 !py-1.5">
+          <Link2 size={11} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /* Drawer                                                                      */
 /* -------------------------------------------------------------------------- */
 
@@ -284,6 +389,7 @@ export default function SettingsDrawer({
   reset,
   riggingReport,
   modelStatus,
+  library,
 }) {
   const [voices, setVoices] = useState([]);
 
@@ -621,6 +727,79 @@ export default function SettingsDrawer({
             )}
           </Section>
 
+          {/* ============ MODEL LIBRARY ============ */}
+          <Section icon={Library} title="Model Library" defaultOpen>
+            <ModelPicker
+              label="Active Avatar"
+              kind="avatar"
+              entries={library?.avatars || []}
+              selectedId={settings.avatarModelId}
+              onSelect={(id) => set('avatarModelId', id)}
+              onRemove={(id) => library?.remove(id)}
+            />
+            <AddModelRow kind="avatar" onUpload={library?.upload} onAddUrl={library?.addUrl} />
+
+            <ModelPicker
+              label="Active Environment"
+              kind="space"
+              entries={library?.spaces || []}
+              selectedId={settings.spaceModelId}
+              onSelect={(id) => set('spaceModelId', id)}
+              onRemove={(id) => library?.remove(id)}
+            />
+            <AddModelRow kind="space" onUpload={library?.upload} onAddUrl={library?.addUrl} />
+
+            {library?.error && (
+              <div className="flex items-start gap-1.5 rounded border border-pink-400/25 bg-pink-400/5 p-2">
+                <AlertTriangle size={11} className="mt-0.5 shrink-0 text-pink-400/80" />
+                <span className="flex-1 text-[9px] leading-relaxed text-pink-100/70">{library.error}</span>
+                <button type="button" onClick={() => library.setError(null)} className="text-pink-300/50">
+                  <X size={10} />
+                </button>
+              </div>
+            )}
+
+            <p className="text-[9px] leading-relaxed text-cyan-300/35">
+              Models added from this device are stored in the browser&apos;s own database, so they
+              survive reloads and work offline — including inside the Android app. Switching is
+              instant; the rig is re-validated on every change.
+            </p>
+
+            {/* ---- Requested Sketchfab models ---- */}
+            <div className="rounded border border-amber-400/20 bg-amber-400/5 p-2">
+              <div className="mb-1.5 flex items-center gap-1.5">
+                <Lock size={10} className="text-amber-400/80" />
+                <span className="text-[10px] uppercase tracking-[0.16em] text-amber-200/80">
+                  Sketchfab picks — download disabled by the artists
+                </span>
+              </div>
+              <p className="mb-2 text-[9px] leading-relaxed text-amber-100/55">
+                All four are marked non-downloadable on Sketchfab, so no account or tool can fetch
+                them — they are store items sold by their authors. Get the .glb from the artist,
+                then add it above.
+              </p>
+              <div className="space-y-1">
+                {SKETCHFAB_CATALOG.map((m) => (
+                  <a
+                    key={m.url}
+                    href={m.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="group flex items-start gap-1.5 rounded px-1 py-1 transition hover:bg-amber-400/10"
+                  >
+                    <ExternalLink size={9} className="mt-1 shrink-0 text-amber-300/40" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[10px] text-amber-100/80">{m.label}</span>
+                      <span className="block truncate text-[8.5px] text-amber-200/40">
+                        {m.author} · {m.stats}
+                      </span>
+                    </span>
+                  </a>
+                ))}
+              </div>
+            </div>
+          </Section>
+
           {/* ============ PROJECTION ============ */}
           <Section icon={Boxes} title="Holographic Projection">
             <Field label="Camera Preset">
@@ -681,6 +860,37 @@ export default function SettingsDrawer({
               onChange={(v) => set('aPoseAngle', v)}
               format={(v) => `${v}°`}
             />
+
+            <div className="rounded border border-cyan-400/12 bg-black/25 p-2">
+              <span className="hud-label mb-1.5 block">Jaw Lip-Sync</span>
+              <Slider
+                label="Mouth Open Angle"
+                value={settings.jawOpenAngle}
+                min={0}
+                max={45}
+                step={1}
+                onChange={(v) => set('jawOpenAngle', v)}
+                format={(v) => `${v}°`}
+              />
+              <div className="mt-2">
+                <Toggle
+                  label="Invert Jaw Direction"
+                  checked={settings.jawInvert}
+                  onChange={(v) => set('jawInvert', v)}
+                  hint="Flip if the jaw closes upward into the skull instead of dropping."
+                />
+                <Toggle
+                  label="Eye Tracking"
+                  checked={settings.eyeTracking}
+                  onChange={(v) => set('eyeTracking', v)}
+                  hint="Gaze follows the pointer when the rig has eye bones."
+                />
+              </div>
+              <p className="mt-1 text-[9px] leading-relaxed text-cyan-300/30">
+                Only used when the model has no viseme blendshapes. The hinge axis is derived from
+                the rig automatically — these adjust how far and which way it swings.
+              </p>
+            </div>
 
             <Slider
               label="Avatar Scale"

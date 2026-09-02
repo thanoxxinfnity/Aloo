@@ -32,6 +32,7 @@ export const REQUIRED_BONES = [
   { key: 'hips', label: 'Hips / Root', aliases: ['hips', 'pelvis', 'root', 'armature'], critical: false },
   { key: 'leftarm', label: 'Left Arm', aliases: ['leftarm', 'larm', 'upperarml', 'armleft', 'lupperarm', 'shoulderl'], critical: false },
   { key: 'rightarm', label: 'Right Arm', aliases: ['rightarm', 'rarm', 'upperarmr', 'armright', 'rupperarm', 'shoulderr'], critical: false },
+  { key: 'jaw', label: 'Jaw', aliases: ['jaw'], critical: false },
   { key: 'lefteye', label: 'Left Eye', aliases: ['lefteye', 'eyel', 'eyeleft'], critical: false },
   { key: 'righteye', label: 'Right Eye', aliases: ['righteye', 'eyer', 'eyeright'], critical: false },
 ];
@@ -99,6 +100,8 @@ export function validateModelRigging(gltf, meta = {}) {
     visemeChecks: { found: [], missing: [], coverage: 0 },
     expressionChecks: { found: [], missing: [] },
     mouthFallback: [],
+    hasJawBone: false,
+    mouthDriveTier: 'none',
     warnings: [],
     errors: [],
     log: [],
@@ -218,11 +221,24 @@ export function validateModelRigging(gltf, meta = {}) {
     (m) => morphLookup.get(m.toLowerCase())
   );
 
+  // A jaw bone is a genuine (if coarse) mouth-drive channel, so its presence
+  // decides whether "no blendshapes" is a failure or merely a downgrade.
+  const jawCheck = report.boneChecks.find((b) => b.key === 'jaw');
+  report.hasJawBone = !!jawCheck?.found;
+
   if (!report.morphTargets.length) {
-    report.errors.push(
-      'No morph targets (blendshapes) on any mesh. Lip-sync will fall back to jaw-bone rotation.'
-    );
-    push('error', 'Zero blendshapes exported — check "Export Shape Keys" in your DCC tool.');
+    if (report.hasJawBone) {
+      report.warnings.push(
+        'No morph targets (blendshapes) on any mesh. Lip-sync will drive the jaw bone instead — ' +
+          'coarser than visemes, but the mouth does open in time with speech.'
+      );
+      push('warn', `Zero blendshapes; falling back to jaw-bone rotation on "${jawCheck.matchedName}".`);
+    } else {
+      report.errors.push(
+        'No morph targets (blendshapes) and no jaw bone. The mouth cannot be driven at all.'
+      );
+      push('error', 'Zero blendshapes exported — check "Export Shape Keys" in your DCC tool.');
+    }
   } else if (visemeFound.length >= 8) {
     push('ok', `Viseme set present: ${visemeFound.length}/${REQUIRED_VISEMES.length} (${report.visemeChecks.coverage}%).`);
   } else if (report.mouthFallback.length) {
@@ -231,11 +247,14 @@ export function validateModelRigging(gltf, meta = {}) {
         `Falling back to amplitude-driven ${report.mouthFallback.join(' / ')}.`
     );
     push('warn', `Partial viseme coverage; using ${report.mouthFallback.join(', ')} instead.`);
+  } else if (report.hasJawBone) {
+    report.warnings.push('No usable mouth morphs — driving the jaw bone instead.');
+    push('warn', `Using jaw-bone rotation on "${jawCheck.matchedName}".`);
   } else {
     report.errors.push(
-      'Neither a viseme set nor mouthOpen/jawOpen morphs exist — the mouth cannot be driven.'
+      'Neither a viseme set, mouth morphs, nor a jaw bone exist — the mouth cannot be driven.'
     );
-    push('error', 'No usable mouth morph targets.');
+    push('error', 'No usable mouth drive channel.');
   }
 
   const exprFound = [];
@@ -276,7 +295,8 @@ export function validateModelRigging(gltf, meta = {}) {
 
   /* -- Grade -------------------------------------------------------------- */
   const hasSkeleton = report.boneCount > 0;
-  const hasMouth = visemeFound.length >= 4 || report.mouthFallback.length > 0;
+  const hasMouth =
+    visemeFound.length >= 4 || report.mouthFallback.length > 0 || report.hasJawBone;
   const criticalBonesOk = report.boneChecks.filter((b) => b.critical).every((b) => b.found);
 
   if (hasSkeleton && hasMouth && criticalBonesOk && !report.errors.length) {
@@ -292,6 +312,15 @@ export function validateModelRigging(gltf, meta = {}) {
     report.grade = 'FAIL';
     report.ok = false;
   }
+
+  report.mouthDriveTier =
+    visemeFound.length >= 4
+      ? 'visemes'
+      : report.mouthFallback.length
+      ? 'amplitude'
+      : report.hasJawBone
+      ? 'jaw-bone'
+      : 'none';
 
   logReport(report);
   return report;

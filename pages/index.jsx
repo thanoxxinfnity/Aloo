@@ -20,7 +20,7 @@
  * the GL context, which would drop the loaded model and reset the camera.
  */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import dynamic from 'next/dynamic';
 import Head from 'next/head';
 import {
@@ -43,6 +43,7 @@ import {
 import useAlooBrain from '@/hooks/useAlooBrain';
 import useAssetAvailable from '@/hooks/useAssetAvailable';
 import useIsMobile from '@/hooks/useIsMobile';
+import useModelLibrary from '@/hooks/useModelLibrary';
 import SciFiHudOverlay from '@/components/ui/SciFiHudOverlay';
 import SettingsDrawer from '@/components/ui/SettingsDrawer';
 import LiveCameraPreview from '@/components/ui/LiveCameraPreview';
@@ -149,6 +150,18 @@ export default function AlooViewport() {
   } = aloo;
 
   const isMobile = useIsMobile();
+  const library = useModelLibrary(settings, set);
+
+  // The canvas takes URLs, the library stores IDs. Resolve here so nothing
+  // below this line has to know the library exists.
+  const sceneSettings = useMemo(
+    () => ({
+      ...settings,
+      avatarModelUrl: library.resolved.avatarUrl,
+      spaceModelUrl: library.resolved.spaceUrl,
+    }),
+    [settings, library.resolved]
+  );
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(true);
@@ -160,7 +173,14 @@ export default function AlooViewport() {
 
   // Probe the avatar GLB once so the canvas can pick GLB vs procedural without
   // ever risking a Suspense throw. See hooks/useAssetAvailable.
-  const modelStatus = useAssetAvailable(settings.avatarModelUrl);
+  const modelStatus = useAssetAvailable(sceneSettings.avatarModelUrl);
+
+  // A stale rig report from the previous GLB must not linger once the scene
+  // falls back to the procedural construct — the HUD would report bones that
+  // are no longer in the scene.
+  useEffect(() => {
+    if (modelStatus === 'missing') setRiggingReport(null);
+  }, [modelStatus, setRiggingReport]);
 
   const model = activeModel(settings);
   const visionReady = VISION_CAPABLE.includes(model);
@@ -213,7 +233,7 @@ export default function AlooViewport() {
         {/* ================= LAYER 0 — WebGL ================= */}
         <div className={`z-0 ${isMobile ? 'absolute inset-0' : canvasClass}`}>
           <AvatarCanvas
-            settings={settings}
+            settings={sceneSettings}
             modelStatus={modelStatus}
             onRiggingReport={setRiggingReport}
             onTelemetry={setTelemetry}
@@ -470,6 +490,7 @@ export default function AlooViewport() {
           reset={reset}
           riggingReport={riggingReport}
           modelStatus={modelStatus}
+          library={library}
         />
       </main>
     </>

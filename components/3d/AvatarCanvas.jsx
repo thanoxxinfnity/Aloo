@@ -48,6 +48,9 @@ import { lipSync, VISEMES, startIdleAnimation } from '@/services/ttsLipSyncServi
  * compressed model just works; the decoder is fetched from the gstatic CDN only
  * when a compressed mesh is actually encountered.
  */
+/** Scratch objects reused every frame — never allocate inside useFrame. */
+const tmpQuat = new THREE.Quaternion();
+
 function configureLoader(loader) {
   const draco = new DRACOLoader();
   draco.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
@@ -58,7 +61,28 @@ function configureLoader(loader) {
 /* GLB-backed avatar                                                           */
 /* -------------------------------------------------------------------------- */
 
-function AvatarModel({ url, scale, offset, settings, onReport }) {
+/**
+ * Work out which local axis opens a jaw bone.
+ *
+ * Hard-coding "rotate the jaw on X" only works for rigs whose jaw happens to be
+ * bound that way; on others X is the twist axis and the mouth never opens (the
+ * bone rotates, but along its own length). Every humanoid jaw hinges about the
+ * character's LEFT-RIGHT axis, so we take world +X and express it in the bone's
+ * local space. Positive rotation about that axis carries a forward point
+ * downward — which is exactly a chin dropping.
+ *
+ * Returns a unit Vector3 in bone-local space, or null when there is no jaw.
+ */
+function jawOpenAxis(scene, jaw) {
+  if (!jaw) return null;
+  // getWorldQuaternion is only meaningful once the matrices are current.
+  scene.updateMatrixWorld(true);
+  const worldQ = new THREE.Quaternion();
+  jaw.getWorldQuaternion(worldQ);
+  return new THREE.Vector3(1, 0, 0).applyQuaternion(worldQ.invert()).normalize();
+}
+
+function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
   const gltf = useLoader(GLTFLoader, url, configureLoader);
   const group = useRef();
   const { pointer } = useThree();
@@ -108,6 +132,7 @@ function AvatarModel({ url, scale, offset, settings, onReport }) {
         leftForeArm: findBone(scene, ['leftforearm', 'lforearm']),
         rightForeArm: findBone(scene, ['rightforearm', 'rforearm']),
       },
+      jawAxis: jawOpenAxis(scene, findBone(scene, ['jaw'])),
       // Which mouth channel do we actually have? Decided once, not per frame.
       hasVisemes: report.visemeChecks.found.length >= 4,
       mouthMorphs: report.mouthFallback,
@@ -124,30 +149,73 @@ function AvatarModel({ url, scale, offset, settings, onReport }) {
      offset, then apply them on an INNER group so the user's own scale/offset
      sliders still compose on top. */
   const fit = useMemo(() => {
-    if (!settings.autoFit) return { scale: 1, offset: [0, 0, 0], measured: null };
     const box = new THREE.Box3().setFromObject(scene);
     const size = new THREE.Vector3();
     const center = new THREE.Vector3();
     box.getSize(size);
     box.getCenter(center);
-    if (!Number.isFinite(size.y) || size.y <= 0) {
-      return { scale: 1, offset: [0, 0, 0], measured: null };
+
+    const usable = settings.autoFit && Number.isFinite(size.y) && size.y > 0;
+    const k = usable ? (settings.avatarTargetHeight || 1.72) / size.y : 1;
+
+    // HORIZONTAL ANCHOR: the hips bone, not the bounding-box centre. A bbox
+    // includes hair, ponytails and held props, so centring on it visibly pushes
+    // an asymmetric character off-axis. The hips are the figure's actual centre
+    // line. (Box3.setFromObject already updated the world matrices for us.)
+    const world = new THREE.Vector3();
+    let anchorX = center.x;
+    let anchorZ = center.z;
+    const hips = findBone(scene, ['hips', 'pelvis', 'root']);
+    if (hips) {
+      hips.getWorldPosition(world);
+      anchorX = world.x;
+      anchorZ = world.z;
     }
-    const k = (settings.avatarTargetHeight || 1.72) / size.y;
+
+    const offset = usable
+      ? [-anchorX * k, -box.min.y * k, -anchorZ * k]
+      : [0, 0, 0];
+
+    // FOCUS POINTS drive the camera presets. Framing a face by a fixed height
+    // only works for one model; measuring the head bone works for every rig.
+    // (This character's ponytail is ~15cm of the total height — assuming eyes
+    //  sit at 92% of it would aim the close-up above her head.)
+    const H = size.y * k;
+    const focus = { height: H, headY: H * 0.86, eyeY: H * 0.93, chestY: H * 0.72 };
+
+    const headBone = findBone(scene, ['head']);
+    if (headBone) {
+      headBone.getWorldPosition(world);
+      // NOTE: the head bone sits at the BASE of the skull (the neck joint), not
+      // at eye level. Aiming a close-up here points the camera at the chin.
+      focus.headY = world.y * k + offset[1];
+      focus.eyeY = focus.headY + H * 0.085; // fallback estimate
+    }
+
+    // Eye bones, when the rig has them, give exact eye level — far better than
+    // any proportion guess, especially for stylised heads.
+    const eyeBone = findBone(scene, ['lefteye', 'eyel', 'righteye', 'eyer']);
+    if (eyeBone) {
+      eyeBone.getWorldPosition(world);
+      focus.eyeY = world.y * k + offset[1];
+    }
+
+    const chestBone = findBone(scene, ['spine2', 'chest', 'spine1']);
+    if (chestBone) {
+      chestBone.getWorldPosition(world);
+      focus.chestY = world.y * k + offset[1];
+    }
+
     // Diagnostics: imported units are the single most common reason an avatar
     // "does not appear" (it is actually 20x too big and the camera is inside it).
     /* eslint-disable-next-line no-console */
     console.info(
       `[ALOO/3d] Auto-fit: measured ${size.x.toFixed(2)} x ${size.y.toFixed(2)} x ${size.z.toFixed(
         2
-      )} units -> scale ${k.toFixed(4)} for a ${(settings.avatarTargetHeight || 1.72).toFixed(2)}m target.`
+      )} units -> scale ${k.toFixed(4)}; head ${focus.headY.toFixed(2)}m, eyes ${focus.eyeY.toFixed(2)}m, chest ${focus.chestY.toFixed(2)}m.`
     );
-    return {
-      scale: k,
-      // Centre horizontally, and put the lowest vertex exactly on the floor.
-      offset: [-center.x * k, -box.min.y * k, -center.z * k],
-      measured: { height: size.y, width: size.x, depth: size.z },
-    };
+
+    return { scale: k, offset, focus, measured: { height: size.y, width: size.x, depth: size.z } };
   }, [scene, settings.autoFit, settings.avatarTargetHeight]);
 
   /* ---- A-pose correction + rest snapshot -----------------------------------
@@ -182,12 +250,20 @@ function AvatarModel({ url, scale, offset, settings, onReport }) {
     Object.entries(rig.bones).forEach(([k, bone]) => {
       if (bone) snap[k] = bone.rotation.clone();
     });
+    // The jaw is driven by quaternion (arbitrary hinge axis), so it needs its
+    // rest orientation in the same form.
+    if (rig.bones.jaw) snap.jawQuat = rig.bones.jaw.quaternion.clone();
     return snap;
   }, [rig, gltf.animations, settings.autoAPose, settings.aPoseAngle]);
 
   useEffect(() => {
     onReport?.(rig.report);
   }, [rig, onReport]);
+
+  // Hand the measured focus points to the camera director.
+  useEffect(() => {
+    onFocus?.(fit.focus);
+  }, [fit, onFocus]);
 
   // Play an idle clip if the artist shipped one.
   useEffect(() => {
@@ -215,13 +291,19 @@ function AvatarModel({ url, scale, offset, settings, onReport }) {
     } else if (rig.mouthMorphs.length) {
       // Amplitude-only fallback: one blendshape, driven by loudness.
       for (const m of rig.mouthMorphs) applyMorph(rig.morphIndex, m, f.mouthOpen);
-    } else if (rig.bones.jaw) {
-      // Tier 3: rotate the jaw bone directly (~17° at full open).
-      rig.bones.jaw.rotation.x = (rest.jaw?.x || 0) + f.jawOpen * 0.3;
+    } else if (rig.bones.jaw && rest.jawQuat && rig.jawAxis) {
+      // Tier 3: hinge the jaw bone. Coarser than visemes — one degree of freedom
+      // instead of fifteen — but the mouth genuinely opens in time with the
+      // audio. The hinge axis is derived from the rig (see jawOpenAxis), so this
+      // works regardless of how the jaw was bound.
+      const swing = THREE.MathUtils.degToRad(settings.jawOpenAngle ?? 22);
+      const sign = settings.jawInvert ? -1 : 1;
+      tmpQuat.setFromAxisAngle(rig.jawAxis, f.jawOpen * swing * sign);
+      rig.bones.jaw.quaternion.copy(rest.jawQuat).multiply(tmpQuat);
     }
-    // Tier 4 (no visemes, no mouth morphs, no jaw bone — this project's avatar)
-    // is handled by the body-performance block below: the character cannot move
-    // its lips, so it speaks with its head, spine and shoulders instead.
+    // Tier 4 (no visemes, no mouth morphs, no jaw bone) is handled by the
+    // body-performance block below: such a character cannot move its lips, so
+    // it speaks with its head, spine and shoulders instead.
     const bodyPerformance = !rig.hasVisemes && !rig.mouthMorphs.length && !rig.bones.jaw;
 
     /* ---- 2. Blink & expression -------------------------------------------- */
@@ -233,6 +315,25 @@ function AvatarModel({ url, scale, offset, settings, onReport }) {
     }
     applyMorph(rig.morphIndex, 'mouthOpen', rig.hasVisemes ? f.mouthOpen * 0.5 : f.mouthOpen);
     applyMorph(rig.morphIndex, 'jawOpen', f.jawOpen);
+
+    /* ---- 2b. Eyes ----------------------------------------------------------
+       Eye BONES let the gaze follow the pointer, which is most of what makes a
+       face feel present. They cannot blink — blinking needs eyelids, i.e. a
+       morph target — so we do not fake it; the diagnostics report it instead.
+       A slow saccade keeps the gaze from looking laser-locked. */
+    if (settings.eyeTracking !== false) {
+      const sacX = Math.sin(t * 0.83) * 0.02 + Math.sin(t * 2.7) * 0.006;
+      const sacY = Math.cos(t * 0.61) * 0.014;
+      const gazeY = THREE.MathUtils.clamp(pointer.x * 0.28, -0.35, 0.35) + sacX;
+      const gazeX = THREE.MathUtils.clamp(-pointer.y * 0.18, -0.22, 0.22) + sacY;
+      for (const key of ['leftEye', 'rightEye']) {
+        const bone = rig.bones[key];
+        const r = rest[key];
+        if (!bone || !r) continue;
+        bone.rotation.y = THREE.MathUtils.lerp(bone.rotation.y, r.y + gazeY, delta * 8);
+        bone.rotation.x = THREE.MathUtils.lerp(bone.rotation.x, r.x + gazeX, delta * 8);
+      }
+    }
 
     /* ---- 3. Head look-at --------------------------------------------------- */
     // Pointer is normalised device coords (-1..1). Clamped so the neck never
@@ -609,6 +710,9 @@ export default function AvatarCanvas({
   className = '',
 }) {
   const [loadFailed, setLoadFailed] = useState(false);
+  // Measured from the loaded rig; falls back to sensible numbers for the
+  // procedural holo-construct, which is built to human scale by construction.
+  const [focus, setFocus] = useState({ height: 1.72, headY: 1.5, eyeY: 1.62, chestY: 1.2 });
 
   const offset = [
     settings.avatarOffsetX || 0,
@@ -664,6 +768,7 @@ export default function AvatarCanvas({
               offset={offset}
               settings={settings}
               onReport={onRiggingReport}
+              onFocus={setFocus}
             />
           </ModelErrorBoundary>
         ) : (
@@ -682,6 +787,7 @@ export default function AvatarCanvas({
       />
 
       <CameraController
+        focus={focus}
         preset={settings.cameraPreset}
         orbitEnabled={settings.orbitEnabled}
         minPolar={settings.minPolar}

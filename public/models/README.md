@@ -4,7 +4,7 @@
 
 | File | What it is | Diagnostic grade |
 |---|---|---|
-| `avatar.glb` | *Mika Melatika*, rigged humanoid — 55 bones, 28,253 triangles, unlit anime shading | **PARTIAL** — full skeleton, **no blendshapes** |
+| `avatar.glb` | *Mika Melatika*, rigged humanoid — 59 bones, 28,253 triangles, unlit anime shading | **PASS** — skeleton + jaw + eye bones, **no blendshapes** |
 | `space.glb` | A galaxy disc of ~8,000 star quads (Sketchfab export) | n/a — static mesh |
 
 ### The avatar's rig, precisely
@@ -14,31 +14,76 @@ the live report. The summary:
 
 | Check | Result |
 |---|---|
-| Skeleton | ✅ 55 bones — `Hips → Spine → Spine1 → Spine2 → Neck → Head`, both arms with **all finger joints**, both legs to the toes |
+| Skeleton | ✅ 59 bones — `Hips → Spine → Spine1 → Spine2 → Neck → Head`, both arms with **all finger joints**, both legs to the toes |
 | Head / Neck / Spine | ✅ present — head look-at, breathing and speech motion all work |
+| **Jaw bone** | ✅ `Jaw` + `JawEnd`, **skin-weighted** (verified: 376 total vertex weight on the body mesh) |
+| **Eye bones** | ✅ `LeftEye` / `RightEye` — gaze tracking works |
 | Viseme blendshapes | ❌ **0 of 15** |
 | `mouthOpen` / `jawOpen` morphs | ❌ none |
-| Jaw bone | ❌ none |
-| Eye bones / blink morphs | ❌ none |
+| Blink morphs | ❌ none — blinking needs eyelids, i.e. a morph; eye *bones* cannot blink |
 | Baked animation clips | ❌ none — ALOO supplies procedural idle motion and the A-pose |
 
-**So: the model is rigged for body animation, but it carries no facial rig at
-all.** Lip-sync by morph target is therefore impossible with this file — there
-is nothing on the mesh to drive. ALOO falls back to its body-performance layer
-(head nods at syllable rate, tilt, torso rotation, arm gestures), which reads as
-talking but is not lip movement.
+**So the mouth CAN be driven, via the jaw bone.** That is tier 3 of ALOO's
+mouth ladder: one degree of freedom instead of fifteen. At the default 22° the
+chin drops about 3 cm on a 1.72 m figure. Because this model is
+`KHR_materials_unlit` with flat anime shading and painted lips, that movement
+reads as subtler than it would on a lit, lip-modelled mesh — turn **Settings →
+Holographic Projection → Jaw Lip-Sync → Mouth Open Angle** up if you want it
+more pronounced, or flip **Invert Jaw Direction** for a rig bound the other way.
 
-To get real lip-sync, the mouth needs shape keys. Either add `viseme_*` (or at
-minimum `mouthOpen`) shape keys to this mesh in Blender, or use a
-ReadyPlayerMe export — see *Getting a model that just works* below. Drop the new
-file in as `avatar.glb` and the validator will re-grade it on the next reload;
-nothing else needs changing.
+The hinge axis is *derived from the rig*, not hard-coded: ALOO takes the
+character's left-right axis and expresses it in the jaw bone's local space, so
+this works on rigs with any bind orientation.
+
+For per-phoneme lip-sync you still need shape keys. Add `viseme_*` (or at
+minimum `mouthOpen`) in Blender, or use a ReadyPlayerMe export — see below. Add
+the new file through **Settings → Model Library**; the validator re-grades on
+every switch.
+
+## Switching models at runtime — Settings → Model Library
+
+You do not have to touch this folder to change models. The drawer's **Model
+Library** section lets you:
+
+- pick the active avatar and environment from a dropdown;
+- **add a `.glb` from your device** — it is stored in the browser's IndexedDB,
+  survives reloads, works offline, and works inside the Android APK (there is no
+  server there to upload to, and none is needed);
+- add a remote `https://` URL to a `.glb`;
+- remove anything you added.
+
+Selection is stored as a library **entry ID**, not a URL — an uploaded model's
+object URL is minted fresh each session, so persisting the URL would break the
+choice on reload.
+
+Two entries are always present per slot: the bundled file, and a fully
+procedural fallback (holo-construct / starfield) that needs no asset at all.
+
+### About the requested Sketchfab models
+
+All four are marked **`isDownloadable: false`** by their authors — verified
+against Sketchfab's own API:
+
+| Model | Author | Downloadable |
+|---|---|---|
+| Anime Character — Miku | LessaB3D | ❌ no |
+| Anime Girl Bikini — Rigged, Shape Keys | LessaB3D | ❌ no |
+| Vermell — Anime Girl Character | ridho.mnf | ❌ no |
+| Mio — Anime Girl Character | ridho.mnf | ❌ no |
+
+That flag is not a login wall — it means Sketchfab serves no download for these
+at all, to anyone. They are store items sold by the artists. So they cannot be
+bundled here; obtain the `.glb` from the artist and add it through the Model
+Library. The drawer links all four for convenience.
+
+Worth noting: *Anime Girl Bikini* advertises **shape keys**, which is exactly
+what this project needs for true per-viseme lip-sync.
 
 ## Bringing your own
 
-Both files are **optional** — ALOO renders a procedural holo-construct and
-starfield when they are absent, so the app is fully usable before you have any
-assets.
+Both bundled files are **optional** — ALOO renders a procedural holo-construct
+and starfield when they are absent, so the app is fully usable before you have
+any assets.
 
 | File | Role | Notes |
 |---|---|---|

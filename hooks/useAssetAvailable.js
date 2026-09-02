@@ -18,6 +18,13 @@ export default function useAssetAvailable(url) {
       setStatus('missing');
       return undefined;
     }
+    // Object URLs and data URLs are in-memory by definition — probing them
+    // over the network is meaningless (and a HEAD on a blob: URL can throw).
+    if (url.startsWith('blob:') || url.startsWith('data:')) {
+      setStatus('available');
+      return undefined;
+    }
+
     let cancelled = false;
     setStatus('checking');
 

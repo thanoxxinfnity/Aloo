@@ -89,6 +89,16 @@ function blankWeights() {
 }
 
 export const lipSync = {
+  /**
+   * RIG TUNING HOLD. Set to a number 0..1 to pin the mouth open at that amount,
+   * or null to resume normal driving. Writing to `frame` directly does not work
+   * — the driver damps every channel back toward its target on the next frame —
+   * so this is the supported way to calibrate a new rig's jaw swing/direction:
+   *
+   *   __alooLipSync.hold = 1     // mouth wide open, hold it
+   *   __alooLipSync.hold = null  // release
+   */
+  hold: null,
   /** Sampled every render frame by the avatar. Mutated in place — never replaced. */
   frame: {
     speaking: false,
@@ -213,6 +223,13 @@ function stopLoopIfIdle() {
   if (mode === 'idle' && rafId != null) {
     // Keep the loop alive briefly so the mouth eases shut instead of snapping.
     setTimeout(() => {
+      // Re-check keepAlive HERE, not just on entry. React StrictMode mounts,
+      // unmounts and remounts every effect in development: the unmount clears
+      // keepAlive and schedules this timeout, the remount sets keepAlive again
+      // and finds the loop still running (so startLoop no-ops) — and then this
+      // timeout would fire and kill the loop of a live, mounted avatar. That
+      // silently froze every idle animation, including blinking.
+      if (keepAlive) return;
       if (mode === 'idle' && rafId != null) {
         cancelAnimationFrame(rafId);
         rafId = null;
@@ -294,6 +311,13 @@ function updateFrame() {
     }
     // Feed the HUD visualiser with the same envelope.
     setSynthetic(true, energy, brightness);
+  }
+
+  // A tuning hold overrides the computed target (see lipSync.hold).
+  if (lipSync.hold != null) {
+    targetOpen = Math.max(0, Math.min(1, lipSync.hold));
+    energy = targetOpen;
+    if (targetOpen > 0.02 && targetViseme === 'sil') targetViseme = 'aa';
   }
 
   // ---- Smooth every channel toward its target. ---------------------------
@@ -546,6 +570,19 @@ export function stopSpeaking() {
 
 export function isSpeaking() {
   return mode !== 'idle';
+}
+
+/**
+ * DEV AFFORDANCE: expose the frame object so a new rig's jaw axis, sign and
+ * swing can be tuned from the console without waiting for speech —
+ *
+ *   __alooLipSync.frame.jawOpen = 1     // hold the mouth open
+ *   __alooLipSync.frame.speaking = true
+ *
+ * Guarded to development so it is not part of the shipped surface.
+ */
+if (typeof window !== 'undefined' && process.env.NODE_ENV !== 'production') {
+  window.__alooLipSync = lipSync;
 }
 
 /**

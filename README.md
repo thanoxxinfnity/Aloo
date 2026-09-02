@@ -157,6 +157,21 @@ referrer headers could leak.
 
 ## How the interesting parts work
 
+### 0. The mouth ladder
+
+Rigs vary enormously in what they expose, so `AvatarCanvas` picks the best
+channel available and the diagnostics name which one is in use:
+
+| Tier | Needs | Fidelity |
+|---|---|---|
+| 1 · visemes | `viseme_aa` … `viseme_U` morphs | per-phoneme mouth shapes |
+| 2 · amplitude | `mouthOpen` / `jawOpen` morph | one blendshape, loudness-driven |
+| 3 · jaw bone | a skin-weighted `Jaw` bone | chin drops in time with the audio |
+| 4 · body | none of the above | head nods, tilt, torso and arm gestures |
+
+Tier 3's hinge axis is derived from the rig rather than hard-coded — hard-coding
+"rotate the jaw on X" silently does nothing on rigs where X is the twist axis.
+
 ### 1. Lip-sync — two paths, one output
 
 `services/ttsLipSyncService.js` writes into a single mutable frame object that
@@ -301,8 +316,9 @@ components/
 services/  nvidiaNimService · geminiService · aiRouter · researchService
            sttService · ttsLipSyncService
 hooks/     useAlooBrain · useWebcam · useSettings · useAssetAvailable · useIsMobile
+           useModelLibrary
 lib/       settingsStore · audioGraph · sseStream · markdown · runtime
-           searchProviders
+           searchProviders · modelLibrary
 pages/     index.jsx · _app.jsx · _document.jsx
            api/nim/chat · api/gemini/chat · api/search
 scripts/   build-static.mjs
