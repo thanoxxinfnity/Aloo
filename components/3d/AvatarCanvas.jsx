@@ -19,6 +19,9 @@
  *      load time, so no per-frame string lookups walk the scene graph.
  *   3. Layer procedural life on top of any baked clip: breathing on the spine,
  *      head look-at toward the pointer, micro-sway on the hips.
+ *   4. Add the animation director's generated gestures (lib/animationDirector).
+ *      Those offsets are ADDITIVE, which is what lets emotion-driven body
+ *      language coexist with lip-sync and look-at instead of overwriting them.
  *
  * MISSING-MODEL BEHAVIOUR
  *   If `/models/avatar.glb` is absent we render `HoloAvatar` — a procedural
@@ -38,6 +41,7 @@ import SpaceBackground from './SpaceBackground';
 import CameraController from './CameraController';
 import { validateModelRigging, buildMorphIndex, applyMorph, findBone } from './RiggingValidator';
 import { lipSync, VISEMES, startIdleAnimation, speak } from '@/services/ttsLipSyncService';
+import { director } from '@/lib/animationDirector';
 import {
   mood,
   startIdleAttention,
@@ -51,14 +55,14 @@ import {
 /* Loader configuration                                                        */
 /* -------------------------------------------------------------------------- */
 
+/** Scratch objects reused every frame — never allocate inside useFrame. */
+const tmpQuat = new THREE.Quaternion();
+
 /**
  * Draco-compressed GLBs are common for avatars. Wiring the decoder here means a
  * compressed model just works; the decoder is fetched from the gstatic CDN only
  * when a compressed mesh is actually encountered.
  */
-/** Scratch objects reused every frame — never allocate inside useFrame. */
-const tmpQuat = new THREE.Quaternion();
-
 function configureLoader(loader) {
   const draco = new DRACOLoader();
   draco.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
@@ -69,22 +73,6 @@ function configureLoader(loader) {
 /* GLB-backed avatar                                                           */
 /* -------------------------------------------------------------------------- */
 
-/**
- * Work out which local axis opens a jaw bone.
- *
- * Hard-coding "rotate the jaw on X" only works for rigs whose jaw happens to be
- * bound that way; on others X is the twist axis and the mouth never opens (the
- * bone rotates, but along its own length). Every humanoid jaw hinges about the
- * character's LEFT-RIGHT axis, so we take world +X and express it in the bone's
- * local space. Positive rotation about that axis carries a forward point
- * downward — which is exactly a chin dropping.
- *
- * Returns a unit Vector3 in bone-local space, or null when there is no jaw.
- */
-/**
- * Every finger joint in the rig, excluding thumbs (which curl on a different
- * axis and look wrong under a uniform curl).
- */
 /**
  * Distinguish a TAP from a camera DRAG.
  *
@@ -115,6 +103,10 @@ function useTapGesture(onTap, enabled) {
   return { onPointerDown, onPointerUp, onPointerCancel: () => { down.current = null; } };
 }
 
+/**
+ * Every finger joint in the rig, excluding thumbs (which curl on a different
+ * axis and look wrong under a uniform curl).
+ */
 function collectFingerBones(scene) {
   const out = [];
   scene.traverse((n) => {
@@ -125,6 +117,18 @@ function collectFingerBones(scene) {
   return out;
 }
 
+/**
+ * Work out which local axis opens a jaw bone.
+ *
+ * Hard-coding "rotate the jaw on X" only works for rigs whose jaw happens to be
+ * bound that way; on others X is the twist axis and the mouth never opens (the
+ * bone rotates, but along its own length). Every humanoid jaw hinges about the
+ * character's LEFT-RIGHT axis, so we take world +X and express it in the bone's
+ * local space. Positive rotation about that axis carries a forward point
+ * downward — which is exactly a chin dropping.
+ *
+ * Returns a unit Vector3 in bone-local space, or null when there is no jaw.
+ */
 function jawOpenAxis(scene, jaw) {
   if (!jaw) return null;
   // getWorldQuaternion is only meaningful once the matrices are current.
@@ -184,6 +188,8 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
         leftForeArm: findBone(scene, ['leftforearm', 'lforearm']),
         rightForeArm: findBone(scene, ['rightforearm', 'rforearm']),
         hips: findBone(scene, ['hips', 'pelvis']),
+        leftShoulder: findBone(scene, ['leftshoulder', 'lshoulder', 'shoulderl', 'leftclavicle']),
+        rightShoulder: findBone(scene, ['rightshoulder', 'rshoulder', 'shoulderr', 'rightclavicle']),
       },
       // Finger joints, collected once. Flat splayed hands are one of the
       // strongest "this is a mannequin" cues; a relaxed curl fixes it for free.
@@ -365,6 +371,12 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
     const wave = settings.tapReaction === false ? 0 : waveProgress(now);
     const pokeWeight = settings.tapReaction === false ? 0 : pokeAttention(now);
 
+    /* ---- 0b. Generated body language ---------------------------------------
+       The director rebuilds a set of ADDITIVE bone offsets each frame from
+       procedurally generated gestures. Additive is the whole trick: it sums
+       onto the look-at, breathing and lip-sync layers instead of fighting them. */
+    const dp = director.update(delta, { speaking: f.speaking, energy: f.energy });
+
     let gazeX = pointer.x;
     let gazeY = pointer.y;
     if (mood.attention === 'away' && settings.idleLookAround !== false) {
@@ -450,17 +462,17 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
 
       rig.bones.head.rotation.y = THREE.MathUtils.lerp(
         rig.bones.head.rotation.y,
-        rest.head.y + targetY + turn,
+        rest.head.y + targetY + turn + dp.head.y,
         delta * track
       );
       rig.bones.head.rotation.x = THREE.MathUtils.lerp(
         rig.bones.head.rotation.x,
-        rest.head.x + targetX + nod,
+        rest.head.x + targetX + nod + dp.head.x,
         delta * track
       );
       rig.bones.head.rotation.z = THREE.MathUtils.lerp(
         rig.bones.head.rotation.z,
-        rest.head.z + tilt,
+        rest.head.z + tilt + dp.head.z,
         delta * 3.0
       );
     }
@@ -469,8 +481,13 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
       // makes a look-at read as a body turning rather than a head swivelling.
       rig.bones.neck.rotation.y = THREE.MathUtils.lerp(
         rig.bones.neck.rotation.y,
-        rest.neck.y + gazeX * 0.14,
+        rest.neck.y + gazeX * 0.14 + dp.neck.y,
         delta * 2.4
+      );
+      rig.bones.neck.rotation.z = THREE.MathUtils.lerp(
+        rig.bones.neck.rotation.z,
+        rest.neck.z + dp.neck.z,
+        delta * 3
       );
     }
 
@@ -478,13 +495,27 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
     if (rig.bones.spine && rest.spine) {
       // ~14 breaths/min at rest, faster and shallower while speaking.
       const rate = f.speaking ? 1.9 : 1.15;
-      rig.bones.spine.rotation.x = rest.spine.x + Math.sin(t * rate) * 0.022;
+      rig.bones.spine.rotation.x = rest.spine.x + Math.sin(t * rate) * 0.022 + dp.spine.x;
       // A touch of torso rotation on emphasis — speaking with the whole body.
       rig.bones.spine.rotation.y = THREE.MathUtils.lerp(
         rig.bones.spine.rotation.y,
-        rest.spine.y + (f.speaking ? Math.sin(t * 1.3) * 0.05 * f.energy : 0),
+        rest.spine.y + (f.speaking ? Math.sin(t * 1.3) * 0.05 * f.energy : 0) + dp.spine.y,
         delta * 2
       );
+      rig.bones.spine.rotation.z = THREE.MathUtils.lerp(
+        rig.bones.spine.rotation.z,
+        rest.spine.z + dp.spine.z,
+        delta * 4
+      );
+    }
+
+    /* ---- 4a. Shoulders (director only) -------------------------------------- */
+    for (const key of ['leftShoulder', 'rightShoulder']) {
+      const bone = rig.bones[key];
+      const r = rest[key];
+      if (!bone || !r) continue;
+      bone.rotation.z = THREE.MathUtils.lerp(bone.rotation.z, r.z + dp[key].z, delta * 5);
+      bone.rotation.x = THREE.MathUtils.lerp(bone.rotation.x, r.x + dp[key].x, delta * 5);
     }
 
     /* ---- 4b. Arms: idle sway, and gesture while speaking -------------------- */
@@ -493,15 +524,25 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
     if (rig.bones.leftArm && rest.leftArm) {
       rig.bones.leftArm.rotation.z = THREE.MathUtils.lerp(
         rig.bones.leftArm.rotation.z,
-        rest.leftArm.z + armSwing + gesture * Math.sin(t * 3.1),
+        rest.leftArm.z + armSwing + gesture * Math.sin(t * 3.1) + dp.leftArm.z,
         delta * 2.4
       );
+      rig.bones.leftArm.rotation.x = THREE.MathUtils.lerp(
+        rig.bones.leftArm.rotation.x,
+        rest.leftArm.x + dp.leftArm.x,
+        delta * 3
+      );
     }
-    if (rig.bones.rightArm && rest.rightArm) {
+    if (rig.bones.rightArm && rest.rightArm && wave === 0) {
       rig.bones.rightArm.rotation.z = THREE.MathUtils.lerp(
         rig.bones.rightArm.rotation.z,
-        rest.rightArm.z - armSwing - gesture * Math.sin(t * 3.1 + 0.9),
+        rest.rightArm.z - armSwing - gesture * Math.sin(t * 3.1 + 0.9) + dp.rightArm.z,
         delta * 2.4
+      );
+      rig.bones.rightArm.rotation.x = THREE.MathUtils.lerp(
+        rig.bones.rightArm.rotation.x,
+        rest.rightArm.x + dp.rightArm.x,
+        delta * 3
       );
     }
     // Elbows. A straight arm is another mannequin cue; real arms rest with a
@@ -510,15 +551,25 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
     if (wave === 0 && rig.bones.leftForeArm && rest.leftForeArm) {
       rig.bones.leftForeArm.rotation.y = THREE.MathUtils.lerp(
         rig.bones.leftForeArm.rotation.y,
-        rest.leftForeArm.y + bend + gesture * 0.7 * Math.sin(t * 2.3),
+        rest.leftForeArm.y + bend + gesture * 0.7 * Math.sin(t * 2.3) + dp.leftForeArm.y,
         delta * 2.2
+      );
+      rig.bones.leftForeArm.rotation.z = THREE.MathUtils.lerp(
+        rig.bones.leftForeArm.rotation.z,
+        rest.leftForeArm.z + dp.leftForeArm.z,
+        delta * 3
       );
     }
     if (wave === 0 && rig.bones.rightForeArm && rest.rightForeArm) {
       rig.bones.rightForeArm.rotation.y = THREE.MathUtils.lerp(
         rig.bones.rightForeArm.rotation.y,
-        rest.rightForeArm.y - bend - gesture * 0.7 * Math.sin(t * 2.3 + 0.6),
+        rest.rightForeArm.y - bend - gesture * 0.7 * Math.sin(t * 2.3 + 0.6) + dp.rightForeArm.y,
         delta * 2.2
+      );
+      rig.bones.rightForeArm.rotation.z = THREE.MathUtils.lerp(
+        rig.bones.rightForeArm.rotation.z,
+        rest.rightForeArm.z + dp.rightForeArm.z,
+        delta * 3
       );
     }
 
@@ -528,8 +579,8 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
        periods keep it from looking like a metronome. */
     if (rig.bones.hips && rest.hips && rest.hipsPos && settings.weightShift !== false) {
       const shift = Math.sin(t * 0.34);
-      rig.bones.hips.rotation.z = rest.hips.z + shift * 0.028;
-      rig.bones.hips.rotation.y = rest.hips.y + Math.sin(t * 0.21) * 0.03;
+      rig.bones.hips.rotation.z = rest.hips.z + shift * 0.028 + dp.hips.z;
+      rig.bones.hips.rotation.y = rest.hips.y + Math.sin(t * 0.21) * 0.03 + dp.hips.y;
       // Position is in the rig's own units, so scale the drift by the fit.
       rig.bones.hips.position.x = rest.hipsPos.x + shift * 0.012 / (fit.scale || 1);
     }
@@ -560,8 +611,9 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
 
     /* ---- 5. Whole-body micro-sway ------------------------------------------ */
     if (group.current) {
-      group.current.position.y = offset[1] + Math.sin(t * 0.9) * 0.008;
-      group.current.rotation.y = Math.sin(t * 0.31) * 0.035;
+      // `root` carries whole-body offsets from the director (e.g. an excited bob).
+      group.current.position.y = offset[1] + Math.sin(t * 0.9) * 0.008 + dp.root.y;
+      group.current.rotation.y = Math.sin(t * 0.31) * 0.035 + dp.root.y * 0.4;
     }
   });
 
@@ -896,6 +948,12 @@ export default function AvatarCanvas({
 
   // Keep the blink/ease loop running for as long as the avatar is on screen.
   useEffect(() => startIdleAnimation(), []);
+
+  // Generated body language: on/off and how big.
+  useEffect(() => {
+    director.enabled = settings.autoGestures !== false;
+    director.scale = settings.gestureIntensity ?? 1;
+  }, [settings.autoGestures, settings.gestureIntensity]);
 
   // The look-away scheduler is what stops the character staring unblinkingly.
   useEffect(() => {

@@ -103,13 +103,21 @@ export function CameraCard({ telemetry }) {
   );
 }
 
-export function SubsystemCard({ listening, speaking, streaming, cameraActive }) {
+export function SubsystemCard({ listening, speaking, streaming, cameraActive, expression }) {
   return (
     <Card icon={Radio} title="Subsystems">
       <Readout label="Audio In" value={listening ? 'ACTIVE' : 'STANDBY'} tone={listening ? 'ok' : 'cyan'} />
       <Readout label="Audio Out" value={speaking ? 'SPEAKING' : 'IDLE'} tone={speaking ? 'ok' : 'cyan'} />
       <Readout label="Optics" value={cameraActive ? 'ONLINE' : 'OFFLINE'} tone={cameraActive ? 'ok' : 'cyan'} />
       <Readout label="Inference" value={streaming ? 'STREAM' : 'READY'} tone={streaming ? 'warn' : 'cyan'} />
+      {/* The emotion the director inferred from the last reply, and the gesture
+          it most recently generated — the body language is legible, not magic. */}
+      <Readout
+        label="Expression"
+        value={(expression?.label || 'Neutral').toUpperCase()}
+        tone={expression?.emotion && expression.emotion !== 'neutral' ? 'ok' : 'cyan'}
+      />
+      <Readout label="Gesture" value={expression?.last || '—'} />
     </Card>
   );
 }
@@ -142,6 +150,7 @@ export default function SciFiHudOverlay({
   speaking = false,
   streaming = false,
   cameraActive = false,
+  expression,
 }) {
   const [clock, setClock] = useState('--:--:--');
   const uptime = useUptime();
@@ -239,6 +248,7 @@ export default function SciFiHudOverlay({
               speaking={speaking}
               streaming={streaming}
               cameraActive={cameraActive}
+              expression={expression}
             />
           </div>
         </>

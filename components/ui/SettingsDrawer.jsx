@@ -1014,6 +1014,18 @@ export default function SettingsDrawer({
                 hint="Slow hip roll — nobody stands perfectly still."
               />
               <Toggle
+                label="Generated Body Language"
+                checked={settings.autoGestures}
+                onChange={(v) => set('autoGestures', v)}
+                hint="Synthesises gestures from parametric archetypes — randomised amplitude, timing and side, so they never repeat."
+              />
+              <Toggle
+                label="Match Emotion To Replies"
+                checked={settings.emotionFromReply}
+                onChange={(v) => set('emotionFromReply', v)}
+                hint="Reads the tone of each answer locally and picks a matching posture and gesture palette."
+              />
+              <Toggle
                 label="React To Tap"
                 checked={settings.tapReaction}
                 onChange={(v) => set('tapReaction', v)}
@@ -1026,6 +1038,15 @@ export default function SettingsDrawer({
                 hint="Speaks a short greeting locally — no API call, no cost."
               />
               <div className="mt-2 space-y-2">
+                <Slider
+                  label="Gesture Intensity"
+                  value={settings.gestureIntensity}
+                  min={0}
+                  max={1.8}
+                  step={0.05}
+                  onChange={(v) => set('gestureIntensity', v)}
+                  format={(v) => `${Math.round(v * 100)}%`}
+                />
                 <Slider
                   label="Elbow Bend"
                   value={settings.elbowBend}

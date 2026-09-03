@@ -146,6 +146,7 @@ export default function AlooViewport() {
     setRiggingReport,
     telemetry,
     setTelemetry,
+    expression,
     hasActiveKey,
     providerLabel,
   } = aloo;
@@ -258,6 +259,7 @@ export default function AlooViewport() {
           speaking={speaking}
           streaming={streaming}
           cameraActive={webcam.active}
+          expression={expression}
         />
 
         {/* ================= LAYER 25 — Interactive HUD ================= */}
@@ -333,6 +335,7 @@ export default function AlooViewport() {
               telemetry={telemetry}
               riggingReport={riggingReport}
               cameraActive={webcam.active}
+              expression={expression}
               webcam={webcam}
               settings={settings}
               visionReady={visionReady}

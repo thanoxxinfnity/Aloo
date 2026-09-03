@@ -172,6 +172,39 @@ channel available and the diagnostics name which one is in use:
 Tier 3's hinge axis is derived from the rig rather than hard-coded — hard-coding
 "rotate the jaw on X" silently does nothing on rigs where X is the twist axis.
 
+### 0b. Generated body language
+
+`lib/animationDirector.js` synthesises the avatar's gestures at runtime. There
+are **no animation clips anywhere in this project** — the bundled rig ships none,
+and a fixed library would repeat anyway. Instead every gesture is a small
+parametric function whose amplitude, duration, cycle count, side and phase are
+resampled on each fire, so two playbacks are never identical.
+
+Three layers sum onto the same rest pose:
+
+| Layer | What it does |
+|---|---|
+| Posture | a slow bias per emotion — lean in when curious, chin up when confident, shoulders in when apologetic |
+| Gesture | 15 archetypes (nod, tilt, shake, shrug, open palms, hand-to-chest, hand-to-chin, point, hair-touch, clasp, lean, bounce, sway…) scheduled on speech beats and idle timers |
+| Idle | breathing, weight shift and look-away, from `avatarMood.js` |
+
+The emotion behind each reply is classified **locally** from the text — a
+lexicon plus structural signals (exclamation count, trailing question mark,
+answer length). No extra API call, no added latency, nothing to malform, and it
+works offline in the APK. Each emotion carries its own weighted bag of gestures,
+its own pace and its own amplitude, so *excited* fires fast, big gestures while
+*thoughtful* fires slow, small ones.
+
+Measured behaviour: 9/9 correct on the classifier's sample set, 287 distinct
+instances out of 300 fires, zero back-to-back repeats in 500 fires. Per-channel
+clamps keep the summed offsets believable (head ≤ 19°, spine ≤ 8°) even at the
+maximum intensity setting with two gestures overlapping.
+
+Output is **additive bone offsets**, which is what lets it coexist with lip-sync,
+look-at and breathing rather than overwriting them. The HUD's Subsystems card
+shows the live emotion and the last gesture generated, so the body language is
+legible rather than magic.
+
 ### 1. Lip-sync — two paths, one output
 
 `services/ttsLipSyncService.js` writes into a single mutable frame object that
@@ -318,7 +351,7 @@ services/  nvidiaNimService · geminiService · aiRouter · researchService
 hooks/     useAlooBrain · useWebcam · useSettings · useAssetAvailable · useIsMobile
            useModelLibrary
 lib/       settingsStore · audioGraph · sseStream · markdown · runtime
-           searchProviders · modelLibrary
+           searchProviders · modelLibrary · avatarMood · animationDirector
 pages/     index.jsx · _app.jsx · _document.jsx
            api/nim/chat · api/gemini/chat · api/search
 scripts/   build-static.mjs

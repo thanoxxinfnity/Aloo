@@ -66,6 +66,7 @@ export default function MobileShell({
   telemetry,
   riggingReport,
   cameraActive,
+  expression,
   // camera
   webcam,
   settings,
@@ -183,6 +184,7 @@ export default function MobileShell({
                   speaking={speaking}
                   streaming={streaming}
                   cameraActive={cameraActive}
+                  expression={expression}
                 />
                 {riggingReport && (
                   <div className="glass bracket rounded-lg p-3">

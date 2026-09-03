@@ -17,6 +17,7 @@ import {
   isSttSupported,
 } from '@/services/sttService';
 import { PROVIDERS, activeModel } from '@/lib/settingsStore';
+import { director } from '@/lib/animationDirector';
 
 /**
  * ALOO — Central state & routing hook.
@@ -81,6 +82,9 @@ export default function useAlooBrain() {
   /* -- 3D diagnostics ------------------------------------------------------ */
   const [riggingReport, setRiggingReport] = useState(null);
   const [telemetry, setTelemetry] = useState(null);
+  const [expression, setExpression] = useState({ label: 'Neutral', emotion: 'neutral', last: null });
+
+  useEffect(() => director.subscribe(setExpression), []);
 
   const abortRef = useRef(null);
   const streamingIdRef = useRef(null);
@@ -113,6 +117,7 @@ export default function useAlooBrain() {
       setError(null);
       setInterimTranscript('');
       stopSpeaking(); // barge-in: a new question cancels the old answer
+      director.setState('thinking');
 
       // Attach the live camera frame if vision is on and the model can take it.
       let images;
@@ -167,6 +172,11 @@ export default function useAlooBrain() {
           prev.map((m) => (m.id === assistantId ? { ...m, content: full, pending: false } : m))
         );
 
+        // Let the body language match what she just said. Classification is
+        // local (see lib/animationDirector) — no extra call, no added latency.
+        if (settings.emotionFromReply !== false) director.setEmotionFromText(full);
+        director.setState('speaking');
+
         // Speak the reply, then hand the mic back if hands-free is on.
         if (settings.ttsEnabled && full.trim()) {
           await speak(sanitizeForSpeech(full));
@@ -182,6 +192,7 @@ export default function useAlooBrain() {
           );
         } else {
           const msg = err.message || 'Unknown error';
+          director.setEmotion('concerned', 0.9);
           setError(msg);
           setMessages((prev) =>
             prev.map((m) =>
@@ -196,6 +207,7 @@ export default function useAlooBrain() {
         abortRef.current = null;
         streamingIdRef.current = null;
         busyRef.current = false;
+        director.setState('idle');
       }
     },
     [messages, settings, webcam]
@@ -213,6 +225,9 @@ export default function useAlooBrain() {
       busyRef.current = true;
       setError(null);
       stopSpeaking();
+      // A research run is a long deliberation — hold a thoughtful posture for it.
+      director.setState('thinking');
+      director.setEmotion('thoughtful', 0.85);
 
       const assistantId = nextId();
       setMessages((prev) => [
@@ -291,6 +306,7 @@ export default function useAlooBrain() {
         setStreaming(false);
         abortRef.current = null;
         busyRef.current = false;
+        director.setState('idle');
       }
     },
     [settings]
@@ -325,6 +341,7 @@ export default function useAlooBrain() {
   const startVoice = useCallback(async () => {
     if (listening) return;
     stopSpeaking();
+    director.setState('listening');
     await startListening();
     setListening(true);
   }, [listening]);
@@ -443,5 +460,6 @@ export default function useAlooBrain() {
     setRiggingReport,
     telemetry,
     setTelemetry,
+    expression,
   };
 }
