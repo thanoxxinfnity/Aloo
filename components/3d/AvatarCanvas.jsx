@@ -130,12 +130,63 @@ function collectFingerBones(scene) {
  * Returns a unit Vector3 in bone-local space, or null when there is no jaw.
  */
 function jawOpenAxis(scene, jaw) {
-  if (!jaw) return null;
+  return lateralAxisIn(scene, jaw);
+}
+
+/**
+ * Express the character's LEFT-RIGHT axis (world +X) inside a bone's local
+ * space. Correct for a jaw, whose bone runs forward/down and is therefore never
+ * parallel to X.
+ */
+function lateralAxisIn(scene, bone) {
+  if (!bone) return null;
   // getWorldQuaternion is only meaningful once the matrices are current.
   scene.updateMatrixWorld(true);
   const worldQ = new THREE.Quaternion();
-  jaw.getWorldQuaternion(worldQ);
+  bone.getWorldQuaternion(worldQ);
   return new THREE.Vector3(1, 0, 0).applyQuaternion(worldQ.invert()).normalize();
+}
+
+/**
+ * Derive a hinge axis from the bone's own GEOMETRY rather than a world guess.
+ *
+ * WHY THE WORLD GUESS FAILS FOR ELBOWS: the bind pose is a T-pose, so the arm
+ * bones point straight along world X. Taking world X as "the hinge" therefore
+ * picks the forearm's own LENGTH axis — rotating on it pronates the wrist and
+ * the hand never lifts. The gesture runs, the bone rotates, and nothing appears
+ * to happen, which is a genuinely hard bug to see.
+ *
+ * A hinge is perpendicular to the limb. We take the bone's direction (toward
+ * its first child joint) crossed with world forward, which for a limb of any
+ * orientation yields the axis that swings the far end forward and back.
+ * Positive rotation about it flexes the joint forward.
+ */
+function hingeAxisFor(scene, bone) {
+  if (!bone) return null;
+  scene.updateMatrixWorld(true);
+
+  const child = bone.children?.find((c) => c.isBone);
+  if (!child) return lateralAxisIn(scene, bone);
+
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  bone.getWorldPosition(a);
+  child.getWorldPosition(b);
+  const dir = b.sub(a);
+  if (dir.lengthSq() < 1e-8) return lateralAxisIn(scene, bone);
+  dir.normalize();
+
+  let axis = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 0, 1));
+  // A limb already pointing along forward has no cross product with it; fall
+  // back to the vertical to get a perpendicular.
+  if (axis.lengthSq() < 1e-4) {
+    axis = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 1, 0));
+  }
+  axis.normalize();
+
+  const worldQ = new THREE.Quaternion();
+  bone.getWorldQuaternion(worldQ);
+  return axis.applyQuaternion(worldQ.invert()).normalize();
 }
 
 function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
@@ -169,6 +220,10 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
 
   const { actions, names } = useAnimations(gltf.animations, group);
 
+  // Elbow flex is smoothed as a scalar; lerping quaternions frame to frame
+  // against a moving target drifts, whereas smoothing the angle does not.
+  const elbowFlex = useRef({ left: 0, right: 0 }).current;
+
   // ---- One-time analysis: validate the rig, index the morphs, find bones ----
   const rig = useMemo(() => {
     const report = validateModelRigging(gltf, { url });
@@ -195,11 +250,20 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
       // strongest "this is a mannequin" cues; a relaxed curl fixes it for free.
       fingers: collectFingerBones(scene),
       jawAxis: jawOpenAxis(scene, findBone(scene, ['jaw'])),
+      elbowAxis: {
+        left: hingeAxisFor(scene, findBone(scene, ['leftforearm', 'lforearm'])),
+        right: hingeAxisFor(scene, findBone(scene, ['rightforearm', 'rforearm'])),
+      },
       // Which mouth channel do we actually have? Decided once, not per frame.
       hasVisemes: report.visemeChecks.found.length >= 4,
       mouthMorphs: report.mouthFallback,
-      blinkMorphs: report.expressionChecks.found.filter((m) => /blink|eyesclosed/i.test(m)),
-      smileMorphs: report.expressionChecks.found.filter((m) => /smile/i.test(m)),
+      // The validator already resolved each expression channel through its
+      // per-pipeline aliases (Oculus / ARKit / VRoid), so the driver just reads
+      // the map instead of pattern-matching names again.
+      faceMorphs: report.expressionMap || {},
+      blinkMorphs: report.expressionMap?.blink || [],
+      smileMorphs: report.expressionMap?.smile || [],
+      visemeMap: report.visemeMap || {},
     };
   }, [gltf, scene, url]);
 
@@ -315,6 +379,10 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
     // The jaw is driven by quaternion (arbitrary hinge axis), so it needs its
     // rest orientation in the same form.
     if (rig.bones.jaw) snap.jawQuat = rig.bones.jaw.quaternion.clone();
+    // Elbows are driven by quaternion about a derived hinge axis, so they need
+    // their rest orientation in the same form.
+    if (rig.bones.leftForeArm) snap.leftForeArmQuat = rig.bones.leftForeArm.quaternion.clone();
+    if (rig.bones.rightForeArm) snap.rightForeArmQuat = rig.bones.rightForeArm.quaternion.clone();
 
     // RELAXED HANDS. A bind pose leaves fingers dead straight, which reads as a
     // shop dummy. A gentle curl, stronger toward the fingertips, is what a hand
@@ -391,9 +459,11 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
 
     /* ---- 1. Mouth --------------------------------------------------------- */
     if (rig.hasVisemes) {
-      // Drive the full viseme set — the highest-fidelity path.
+      // Drive the full viseme set through the resolved names — a VRoid model
+      // gets `Fcl_MTH_A` where a ReadyPlayerMe one gets `viseme_aa`.
       for (const v of VISEMES) {
-        applyMorph(rig.morphIndex, `viseme_${v}`, f.weights[v] || 0);
+        const morph = rig.visemeMap[v];
+        if (morph) applyMorph(rig.morphIndex, morph, f.weights[v] || 0);
       }
     } else if (rig.mouthMorphs.length) {
       // Amplitude-only fallback: one blendshape, driven by loudness.
@@ -413,11 +483,23 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
     // it speaks with its head, spine and shoulders instead.
     const bodyPerformance = !rig.hasVisemes && !rig.mouthMorphs.length && !rig.bones.jaw;
 
-    /* ---- 2. Blink & expression -------------------------------------------- */
+    /* ---- 2. Blink & emotional expression -----------------------------------
+       The director's per-emotion face weights are applied to whichever channels
+       the model actually provides. A rig with no facial blendshapes (like the
+       bundled one) simply has nothing to write to — the emotion still reads
+       through posture and gesture. */
     if (rig.blinkMorphs.length) {
       for (const m of rig.blinkMorphs) applyMorph(rig.morphIndex, m, f.blink);
     }
-    if (rig.smileMorphs.length) {
+    if (settings.facialExpression !== false) {
+      for (const [channel, morphs] of Object.entries(rig.faceMorphs)) {
+        if (channel === 'blink') continue; // driven by the blink timer above
+        const w = dp.face[channel] || 0;
+        for (const m of morphs) applyMorph(rig.morphIndex, m, w);
+      }
+    }
+    // Idle smile, only where the emotion layer is not already driving one.
+    if (rig.smileMorphs.length && (settings.facialExpression === false || !dp.face.smile)) {
       for (const m of rig.smileMorphs) applyMorph(rig.morphIndex, m, f.mouthSmile);
     }
     applyMorph(rig.morphIndex, 'mouthOpen', rig.hasVisemes ? f.mouthOpen * 0.5 : f.mouthOpen);
@@ -545,32 +627,28 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
         delta * 3
       );
     }
-    // Elbows. A straight arm is another mannequin cue; real arms rest with a
-    // slight bend. Skipped while waving, which drives the forearm itself.
+    /* ---- Elbows -------------------------------------------------------------
+       Driven as a HINGE about the axis derived from the rig, not as an euler
+       angle. On this rig the forearm's local Y is the bone's own length axis,
+       so rotating on it pronates the wrist and the hand never lifts — which is
+       exactly why gestures looked like nothing was happening.
+
+       `dp.*ForeArm.y` from the director is read as a flex AMOUNT, positive for
+       the left arm and negative for the right (matching how the gestures are
+       written); both are converted to the same physical bend here. */
     const bend = THREE.MathUtils.degToRad(settings.elbowBend ?? 11);
-    if (wave === 0 && rig.bones.leftForeArm && rest.leftForeArm) {
-      rig.bones.leftForeArm.rotation.y = THREE.MathUtils.lerp(
-        rig.bones.leftForeArm.rotation.y,
-        rest.leftForeArm.y + bend + gesture * 0.7 * Math.sin(t * 2.3) + dp.leftForeArm.y,
-        delta * 2.2
-      );
-      rig.bones.leftForeArm.rotation.z = THREE.MathUtils.lerp(
-        rig.bones.leftForeArm.rotation.z,
-        rest.leftForeArm.z + dp.leftForeArm.z,
-        delta * 3
-      );
+    if (wave === 0 && rig.bones.leftForeArm && rest.leftForeArmQuat && rig.elbowAxis.left) {
+      const flex = bend + gesture * 0.7 * Math.sin(t * 2.3) + dp.leftForeArm.y;
+      elbowFlex.left = THREE.MathUtils.lerp(elbowFlex.left, flex, delta * 6);
+      // Positive about the geometric hinge flexes the joint forward.
+      tmpQuat.setFromAxisAngle(rig.elbowAxis.left, elbowFlex.left);
+      rig.bones.leftForeArm.quaternion.copy(rest.leftForeArmQuat).multiply(tmpQuat);
     }
-    if (wave === 0 && rig.bones.rightForeArm && rest.rightForeArm) {
-      rig.bones.rightForeArm.rotation.y = THREE.MathUtils.lerp(
-        rig.bones.rightForeArm.rotation.y,
-        rest.rightForeArm.y - bend - gesture * 0.7 * Math.sin(t * 2.3 + 0.6) + dp.rightForeArm.y,
-        delta * 2.2
-      );
-      rig.bones.rightForeArm.rotation.z = THREE.MathUtils.lerp(
-        rig.bones.rightForeArm.rotation.z,
-        rest.rightForeArm.z + dp.rightForeArm.z,
-        delta * 3
-      );
+    if (wave === 0 && rig.bones.rightForeArm && rest.rightForeArmQuat && rig.elbowAxis.right) {
+      const flex = bend + gesture * 0.7 * Math.sin(t * 2.3 + 0.6) - dp.rightForeArm.y;
+      elbowFlex.right = THREE.MathUtils.lerp(elbowFlex.right, flex, delta * 6);
+      tmpQuat.setFromAxisAngle(rig.elbowAxis.right, elbowFlex.right);
+      rig.bones.rightForeArm.quaternion.copy(rest.rightForeArmQuat).multiply(tmpQuat);
     }
 
     /* ---- 4c. Weight shift ---------------------------------------------------
@@ -932,6 +1010,7 @@ export default function AvatarCanvas({
   modelStatus, // 'checking' | 'available' | 'missing'
   onRiggingReport,
   onTelemetry,
+  uiBias = 0,
   className = '',
 }) {
   const [loadFailed, setLoadFailed] = useState(false);
@@ -953,7 +1032,8 @@ export default function AvatarCanvas({
   useEffect(() => {
     director.enabled = settings.autoGestures !== false;
     director.scale = settings.gestureIntensity ?? 1;
-  }, [settings.autoGestures, settings.gestureIntensity]);
+    director.faceScale = settings.facialExpression === false ? 0 : settings.expressionIntensity ?? 1;
+  }, [settings.autoGestures, settings.gestureIntensity, settings.facialExpression, settings.expressionIntensity]);
 
   // The look-away scheduler is what stops the character staring unblinkingly.
   useEffect(() => {
@@ -1025,6 +1105,7 @@ export default function AvatarCanvas({
 
       <CameraController
         focus={focus}
+        uiBias={uiBias}
         preset={settings.cameraPreset}
         orbitEnabled={settings.orbitEnabled}
         minPolar={settings.minPolar}

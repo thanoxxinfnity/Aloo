@@ -37,21 +37,76 @@ export const REQUIRED_BONES = [
   { key: 'righteye', label: 'Right Eye', aliases: ['righteye', 'eyer', 'eyeright'], critical: false },
 ];
 
-/** Oculus/ARKit-style viseme morphs used by the lip-sync driver. */
+/** Oculus/ReadyPlayerMe viseme morphs used by the lip-sync driver. */
 export const REQUIRED_VISEMES = [
   'viseme_sil', 'viseme_PP', 'viseme_FF', 'viseme_TH', 'viseme_DD',
   'viseme_kk', 'viseme_CH', 'viseme_SS', 'viseme_nn', 'viseme_RR',
   'viseme_aa', 'viseme_E', 'viseme_I', 'viseme_O', 'viseme_U',
 ];
 
+/**
+ * The same mouth shape has a different name in every pipeline. VRoid Studio
+ * (by far the most common source of anime avatars) exports `Fcl_MTH_A`; ARKit
+ * exports `jawOpen` + `mouthFunnel`; ReadyPlayerMe exports `viseme_aa`. Without
+ * aliases, a perfectly capable model is graded as having no visemes at all.
+ *
+ * Each ALOO viseme maps to the candidate names, best first. Matching is
+ * case-insensitive.
+ */
+export const VISEME_ALIASES = {
+  sil: ['viseme_sil', 'Fcl_MTH_Close', 'mouthClose', 'sil'],
+  PP: ['viseme_PP', 'Fcl_MTH_Close', 'mouthPress', 'PP'],
+  FF: ['viseme_FF', 'Fcl_MTH_Fun', 'mouthFunnel', 'FF'],
+  TH: ['viseme_TH', 'Fcl_MTH_A', 'tongueOut', 'TH'],
+  DD: ['viseme_DD', 'Fcl_MTH_A', 'mouthShrugUpper', 'DD'],
+  kk: ['viseme_kk', 'Fcl_MTH_A', 'kk'],
+  CH: ['viseme_CH', 'Fcl_MTH_I', 'mouthPucker', 'CH'],
+  SS: ['viseme_SS', 'Fcl_MTH_I', 'mouthStretchLeft', 'SS'],
+  nn: ['viseme_nn', 'Fcl_MTH_N', 'nn'],
+  RR: ['viseme_RR', 'Fcl_MTH_E', 'RR'],
+  aa: ['viseme_aa', 'Fcl_MTH_A', 'A', 'aa', 'jawOpen'],
+  E: ['viseme_E', 'Fcl_MTH_E', 'E', 'e'],
+  I: ['viseme_I', 'Fcl_MTH_I', 'I', 'i'],
+  O: ['viseme_O', 'Fcl_MTH_O', 'O', 'o'],
+  U: ['viseme_U', 'Fcl_MTH_U', 'U', 'u'],
+};
+
 /** Minimum viable mouth control when no viseme set exists. */
-export const FALLBACK_MOUTH_MORPHS = ['mouthOpen', 'jawOpen', 'mouthOpen_Big', 'JawOpen', 'A'];
+export const FALLBACK_MOUTH_MORPHS = [
+  'mouthOpen', 'jawOpen', 'mouthOpen_Big', 'JawOpen', 'A', 'Fcl_MTH_A',
+];
 
 /** Expression morphs used for blinking and idle life. */
 export const REQUIRED_EXPRESSIONS = [
   'eyeBlinkLeft', 'eyeBlinkRight', 'blink', 'eyesClosed',
   'mouthSmile', 'mouthSmileLeft', 'mouthSmileRight', 'browInnerUp',
 ];
+
+/**
+ * Facial expression channels ALOO drives from the emotion director, each with
+ * per-pipeline aliases. A model only needs to provide some of them.
+ */
+export const EXPRESSION_ALIASES = {
+  blink: ['eyeBlinkLeft', 'eyeBlinkRight', 'blink', 'eyesClosed', 'Fcl_EYE_Close', 'Blink'],
+  smile: [
+    'mouthSmile', 'mouthSmileLeft', 'mouthSmileRight',
+    'Fcl_MTH_Joy', 'Fcl_ALL_Joy', 'Joy', 'Smile', 'happy',
+  ],
+  browUp: ['browInnerUp', 'browOuterUpLeft', 'browOuterUpRight', 'Fcl_BRW_Surprised', 'Surprised'],
+  browDown: ['browDownLeft', 'browDownRight', 'Fcl_BRW_Angry', 'Angry'],
+  sad: ['mouthFrownLeft', 'mouthFrownRight', 'Fcl_ALL_Sorrow', 'Fcl_MTH_Sorrow', 'Sorrow', 'sad'],
+  squint: ['eyeSquintLeft', 'eyeSquintRight', 'Fcl_EYE_Joy'],
+};
+
+/** Resolve an alias list against a model's actual morph names. */
+export function resolveAliases(morphLookup, aliases) {
+  const hits = [];
+  for (const name of aliases) {
+    const real = morphLookup.get(name.toLowerCase());
+    if (real && !hits.includes(real)) hits.push(real);
+  }
+  return hits;
+}
 
 /* -------------------------------------------------------------------------- */
 /* Normalisation                                                               */
@@ -102,6 +157,8 @@ export function validateModelRigging(gltf, meta = {}) {
     mouthFallback: [],
     hasJawBone: false,
     mouthDriveTier: 'none',
+    visemeMap: {},
+    expressionMap: {},
     warnings: [],
     errors: [],
     log: [],
@@ -202,12 +259,19 @@ export function validateModelRigging(gltf, meta = {}) {
   /* -- 2. Morph targets / visemes ---------------------------------------- */
   const morphLookup = new Map(report.morphTargets.map((m) => [m.toLowerCase(), m]));
 
+  // Score against the ALIAS table, not the literal Oculus names — a VRoid model
+  // has every one of these shapes, just under `Fcl_MTH_*`.
   const visemeFound = [];
   const visemeMissing = [];
-  REQUIRED_VISEMES.forEach((v) => {
-    const hit = morphLookup.get(v.toLowerCase());
-    if (hit) visemeFound.push(hit);
-    else visemeMissing.push(v);
+  report.visemeMap = {};
+  Object.entries(VISEME_ALIASES).forEach(([key, aliases]) => {
+    const hit = resolveAliases(morphLookup, aliases)[0];
+    if (hit) {
+      visemeFound.push(hit);
+      report.visemeMap[key] = hit;
+    } else {
+      visemeMissing.push(`viseme_${key}`);
+    }
   });
   report.visemeChecks = {
     found: visemeFound,
@@ -259,10 +323,15 @@ export function validateModelRigging(gltf, meta = {}) {
 
   const exprFound = [];
   const exprMissing = [];
-  REQUIRED_EXPRESSIONS.forEach((e) => {
-    const hit = morphLookup.get(e.toLowerCase());
-    if (hit) exprFound.push(hit);
-    else exprMissing.push(e);
+  report.expressionMap = {};
+  Object.entries(EXPRESSION_ALIASES).forEach(([channel, aliases]) => {
+    const hits = resolveAliases(morphLookup, aliases);
+    if (hits.length) {
+      report.expressionMap[channel] = hits;
+      exprFound.push(...hits);
+    } else {
+      exprMissing.push(channel);
+    }
   });
   report.expressionChecks = { found: exprFound, missing: exprMissing };
   if (!exprFound.length) {

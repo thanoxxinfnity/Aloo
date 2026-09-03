@@ -75,6 +75,13 @@ const DEG = Math.PI / 180;
 
 export default function CameraController({
   focus,
+  /**
+   * Fraction of the viewport (0..1) hidden behind UI at the BOTTOM — the mobile
+   * sheet, mainly. Lowering the camera AND its target by the same amount slides
+   * the subject up the frame without changing the angle, which keeps her face
+   * in the visible strip instead of behind the panel.
+   */
+  uiBias = 0,
   preset = CAMERA_PRESETS.UPPER_BODY,
   orbitEnabled = true,
   minPolar = 55,
@@ -94,7 +101,35 @@ export default function CameraController({
 
   const isCinematic = preset === CAMERA_PRESETS.CINEMATIC;
   const poses = useMemo(() => presetPoses(focus), [focus]);
-  const pose = poses[preset] || poses[CAMERA_PRESETS.UPPER_BODY];
+  const basePose = poses[preset] || poses[CAMERA_PRESETS.UPPER_BODY];
+  const pose = useMemo(() => {
+    if (!uiBias) return basePose;
+
+    // Put HER FACE in the middle of the visible strip.
+    //
+    // Centring the frame's midpoint on the strip is the obvious move and it is
+    // wrong: the subject of interest is not at the frame centre, so doing that
+    // overshoots and pushes her head clean off the top. Instead we solve for the
+    // target directly — the face should sit (uiBias/2) of a frame-height above
+    // the frame centre, and a frame height at this shot's distance is
+    // 2·d·tan(fov/2).
+    const dx = basePose.position[0] - basePose.target[0];
+    const dy = basePose.position[1] - basePose.target[1];
+    const dz = basePose.position[2] - basePose.target[2];
+    const dist = Math.hypot(dx, dy, dz) || 1;
+    const frameHeight = 2 * dist * Math.tan((basePose.fov * DEG) / 2);
+
+    const faceY = focus?.eyeY ?? basePose.target[1];
+    const wantedTargetY = faceY - (uiBias / 2) * frameHeight;
+    // Clamp: a pathological bias should never fling the camera into the floor.
+    const shift = THREE.MathUtils.clamp(basePose.target[1] - wantedTargetY, -frameHeight, frameHeight);
+
+    return {
+      ...basePose,
+      position: [basePose.position[0], basePose.position[1] - shift, basePose.position[2]],
+      target: [basePose.target[0], basePose.target[1] - shift, basePose.target[2]],
+    };
+  }, [basePose, uiBias, focus]);
 
   /* -- Kick off an eased move whenever the preset changes ----------------- */
   useEffect(() => {
@@ -108,7 +143,7 @@ export default function CameraController({
     cinematicT.current = 0;
     // Also re-runs when `focus` resolves: the rig is measured after the first
     // frame, so the initial pose is a guess until the model reports back.
-  }, [preset, camera, focus]);
+  }, [preset, camera, focus, uiBias]);
 
   /* -- Cancel the transition the instant the user grabs the scene --------- */
   useEffect(() => {

@@ -168,6 +168,7 @@ export default function AlooViewport() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(true);
   const [researchOpen, setResearchOpen] = useState(false);
+  const [keyPromptDismissed, setKeyPromptDismissed] = useState(false);
 
   // Mobile sheet state.
   const [sheetTab, setSheetTab] = useState('comms');
@@ -213,6 +214,14 @@ export default function AlooViewport() {
     [runResearch, isMobile]
   );
 
+  // The same failure is already rendered as an assistant message, so the toast
+  // is a transient nudge, not the record — leaving it pinned just covers the UI.
+  useEffect(() => {
+    if (!error) return undefined;
+    const id = setTimeout(() => setError(null), 6000);
+    return () => clearTimeout(id);
+  }, [error, setError]);
+
   const toggleTts = useCallback(() => {
     if (settings.ttsEnabled) stopSpeaking();
     set('ttsEnabled', !settings.ttsEnabled);
@@ -239,6 +248,9 @@ export default function AlooViewport() {
             modelStatus={modelStatus}
             onRiggingReport={setRiggingReport}
             onTelemetry={setTelemetry}
+            // The expanded mobile sheet hides ~68% of the screen; tell the
+            // camera so it reframes her face into the visible strip.
+            uiBias={isMobile && sheetExpanded ? 0.68 : 0}
             className="h-full w-full"
           />
         </div>
@@ -437,39 +449,85 @@ export default function AlooViewport() {
           </>
         )}
 
-        {/* --- First-run key prompt --- */}
-        {!hasActiveKey && (
-          <div
-            className="absolute left-1/2 z-25 w-[min(430px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2"
-            style={{ top: isMobile ? '34%' : '50%' }}
-          >
-            <div className="glass-strong bracket rounded-xl p-5 text-center">
-              <div className="mb-2 text-[11px] uppercase tracking-[0.32em] text-cyan-200/80">
-                Neural Link Offline
+        {/* --- First-run key prompt ---
+            POINTER-EVENTS MATTER HERE. This card is on screen exactly when the
+            operator has no key yet — i.e. while they are trying to reach the
+            settings, the tabs and the rail. A full-width interactive wrapper
+            swallowed every one of those taps, so the wrapper is inert and only
+            the card itself takes input. It is also dismissible, because a
+            permanent overlay on a phone is a wall. */}
+        {!hasActiveKey && !keyPromptDismissed &&
+          (isMobile ? (
+            /* Phone: a compact banner pinned under the status pill. Floating a
+               card in the middle of the screen put it straight on top of the
+               sheet tabs and the right-edge rail — the very controls someone
+               with no key still needs to reach. */
+            <div className="pointer-events-none absolute inset-x-3 top-12 z-25">
+              <div className="glass-strong bracket pointer-events-auto flex items-center gap-2 rounded-lg p-2.5">
+                <AlertTriangle size={14} className="shrink-0 text-amber-400" />
+                <span className="flex-1 text-[10.5px] leading-snug text-cyan-100/70">
+                  No API key yet — ALOO cannot think until you add one.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setDrawerOpen(true)}
+                  className="hud-btn hud-btn-active shrink-0 !px-2 !py-1.5 text-[9px]"
+                >
+                  Add key
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setKeyPromptDismissed(true)}
+                  aria-label="Dismiss"
+                  className="shrink-0 rounded p-1 text-cyan-300/40"
+                >
+                  <X size={12} />
+                </button>
               </div>
-              <p className="mb-4 text-[11.5px] leading-relaxed text-cyan-100/60">
-                ALOO needs an API key to think. Add a free key for{' '}
-                <span className="text-cyan-300">Google Gemini</span> or{' '}
-                <span className="text-cyan-300">NVIDIA NIM</span> in the control drawer — it is stored
-                only in this browser.
-              </p>
-              <button
-                type="button"
-                onClick={() => setDrawerOpen(true)}
-                className="hud-btn hud-btn-active mx-auto min-h-[44px]"
-              >
-                <Settings size={12} />
-                Open Control Drawer
-              </button>
             </div>
-          </div>
-        )}
+          ) : (
+            <div className="pointer-events-none absolute left-1/2 top-1/2 z-25 w-[min(430px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2">
+              <div className="glass-strong bracket pointer-events-auto relative rounded-xl p-5 text-center">
+                <button
+                  type="button"
+                  onClick={() => setKeyPromptDismissed(true)}
+                  aria-label="Dismiss"
+                  className="absolute right-2 top-2 rounded p-1 text-cyan-300/40 transition hover:text-cyan-200"
+                >
+                  <X size={12} />
+                </button>
+                <div className="mb-2 text-[11px] uppercase tracking-[0.32em] text-cyan-200/80">
+                  Neural Link Offline
+                </div>
+                <p className="mb-4 text-[11.5px] leading-relaxed text-cyan-100/60">
+                  ALOO needs an API key to think. Add a free key for{' '}
+                  <span className="text-cyan-300">Google Gemini</span> or{' '}
+                  <span className="text-cyan-300">NVIDIA NIM</span> in the control drawer — it is
+                  stored only in this browser.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setDrawerOpen(true)}
+                  className="hud-btn hud-btn-active mx-auto min-h-[44px]"
+                >
+                  <Settings size={12} />
+                  Open Control Drawer
+                </button>
+              </div>
+            </div>
+          ))}
 
         {/* --- Error toast --- */}
         {error && (
           <div
             className="absolute left-1/2 z-30 w-[min(460px,calc(100vw-1.5rem))] -translate-x-1/2"
-            style={{ bottom: isMobile ? 'calc(5.5rem + env(safe-area-inset-bottom))' : '6rem' }}
+            style={{
+              bottom: isMobile
+                ? sheetExpanded
+                  ? 'calc(min(68dvh, 620px) + 0.75rem)'
+                  : 'calc(9rem + env(safe-area-inset-bottom))'
+                : '6rem',
+            }}
           >
             <div className="glass-strong flex items-start gap-2 rounded-lg border-pink-400/35 p-3">
               <AlertTriangle size={13} className="mt-0.5 shrink-0 text-pink-400" />

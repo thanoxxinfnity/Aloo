@@ -171,6 +171,16 @@ channel available and the diagnostics name which one is in use:
 
 Tier 3's hinge axis is derived from the rig rather than hard-coded — hard-coding
 "rotate the jaw on X" silently does nothing on rigs where X is the twist axis.
+Elbows are derived the same way, but from the bone's own geometry rather than a
+world axis: the bind pose is a T-pose, so the arms point *along* world X and
+using it would pick the forearm's length axis, pronating the wrist while the
+hand never moves.
+
+Blendshape names are matched through an alias table, so the same mouth shape is
+found whether the model calls it `viseme_aa` (ReadyPlayerMe), `Fcl_MTH_A`
+(VRoid) or `jawOpen` (ARKit). Facial expression channels — smile, brow, squint,
+sorrow — resolve the same way and are driven from the emotion the director
+inferred, on any model that provides them.
 
 ### 0b. Generated body language
 

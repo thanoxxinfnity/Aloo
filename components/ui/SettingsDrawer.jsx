@@ -15,7 +15,7 @@
  * edge proxies forward them upstream.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   X,
   KeyRound,
@@ -38,6 +38,7 @@ import {
   Trash2,
   Library,
   Lock,
+  ClipboardPaste,
 } from 'lucide-react';
 import { SKETCHFAB_CATALOG } from '@/lib/modelLibrary';
 
@@ -136,25 +137,89 @@ function Slider({ label, value, min, max, step, onChange, format }) {
   );
 }
 
+/**
+ * API key field, hardened for Android WebView.
+ *
+ * THE BUG THIS EXISTS TO PREVENT
+ * A plain controlled input silently EATS pastes on Android. The clipboard
+ * overlay can set the element's value without firing an `input` event React
+ * recognises; React then re-renders, sees its own (still empty) state, and
+ * writes that back over the DOM. The user watches their key appear and then
+ * vanish about a second later, and concludes the app deleted it.
+ *
+ * Four independent paths now capture the value, so no single failure loses it:
+ *   1. onChange        — the normal path.
+ *   2. onPaste         — re-read on the next tick, because the paste event
+ *                        fires BEFORE the element's value is updated.
+ *   3. a focus poll    — while the field is focused, any divergence between the
+ *                        DOM and React state is adopted. This catches value
+ *                        changes that fire no event at all, whatever caused them.
+ *   4. a Paste button  — navigator.clipboard.readText(), bypassing the IME and
+ *                        the paste event entirely. On a phone this is the path
+ *                        that always works.
+ */
 function SecretInput({ value, onChange, placeholder }) {
   const [visible, setVisible] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [pasteMsg, setPasteMsg] = useState(null);
+  const ref = useRef(null);
   const has = !!value;
+
+  // Path 3: adopt any DOM value React did not hear about.
+  useEffect(() => {
+    if (!focused) return undefined;
+    const id = setInterval(() => {
+      const el = ref.current;
+      if (el && el.value !== value) onChange(el.value);
+    }, 250);
+    return () => clearInterval(id);
+  }, [focused, value, onChange]);
+
+  // Path 4: read the clipboard directly.
+  const pasteFromClipboard = async () => {
+    setPasteMsg(null);
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text && text.trim()) {
+        onChange(text.trim());
+        setPasteMsg({ ok: true, text: 'Pasted from clipboard' });
+      } else {
+        setPasteMsg({ ok: false, text: 'Clipboard is empty' });
+      }
+    } catch {
+      // Denied or unsupported — long-press the field and use the system paste.
+      setPasteMsg({ ok: false, text: 'Clipboard blocked — long-press the field and paste' });
+    }
+    setTimeout(() => setPasteMsg(null), 4000);
+  };
 
   return (
     <div>
       <div className="relative">
         <input
+          ref={ref}
           type={visible ? 'text' : 'password'}
           className={`hud-input pr-16 ${has ? '!border-emerald-400/50' : ''}`}
           value={value}
           onChange={(e) => onChange(e.target.value)}
+          onInput={(e) => onChange(e.currentTarget.value)}
+          onPaste={(e) => {
+            // The value is not updated yet when this fires.
+            const el = e.currentTarget;
+            setTimeout(() => onChange(el.value), 0);
+          }}
+          onFocus={() => setFocused(true)}
+          onBlur={(e) => {
+            setFocused(false);
+            onChange(e.currentTarget.value);
+          }}
           placeholder={placeholder}
           autoComplete="off"
           autoCorrect="off"
           autoCapitalize="off"
           spellCheck={false}
-          // Password fields on Android sometimes refuse a paste from the
-          // clipboard bar; inputMode text keeps the normal keyboard and paste.
+          // Keeps the normal keyboard (and its paste bar) rather than a
+          // password keyboard, which on some Android IMEs hides paste entirely.
           inputMode="text"
         />
         <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1.5">
@@ -179,12 +244,37 @@ function SecretInput({ value, onChange, placeholder }) {
         </div>
       </div>
 
-      {/* Explicit confirmation. A masked field looks identical whether it holds
-          a key or nothing, which is exactly how a saved key comes to look lost. */}
-      {has && (
-        <div className="mt-1 flex items-center gap-1 text-[9px] text-emerald-300/80">
-          <Check size={9} />
-          Saved · {value.length} chars, ends &ldquo;{value.slice(-4)}&rdquo;
+      <div className="mt-1 flex items-center justify-between gap-2">
+        {/* Explicit confirmation. A masked field looks identical whether it holds
+            a key or nothing, which is exactly how a saved key comes to look lost. */}
+        {has ? (
+          <span className="flex items-center gap-1 text-[9px] text-emerald-300/80">
+            <Check size={9} />
+            Saved · {value.length} chars, ends &ldquo;{value.slice(-4)}&rdquo;
+          </span>
+        ) : (
+          <span className="text-[9px] text-cyan-300/30">Not set</span>
+        )}
+
+        <button
+          type="button"
+          onClick={pasteFromClipboard}
+          className="flex shrink-0 items-center gap-1 rounded border border-cyan-400/25 px-1.5 py-0.5
+                     text-[9px] uppercase tracking-wider text-cyan-200/75 transition
+                     hover:border-cyan-400/70 hover:bg-cyan-400/10"
+        >
+          <ClipboardPaste size={9} />
+          Paste
+        </button>
+      </div>
+
+      {pasteMsg && (
+        <div
+          className={`mt-1 text-[9px] leading-relaxed ${
+            pasteMsg.ok ? 'text-emerald-300/80' : 'text-amber-200/80'
+          }`}
+        >
+          {pasteMsg.text}
         </div>
       )}
     </div>
@@ -1020,6 +1110,12 @@ export default function SettingsDrawer({
                 hint="Synthesises gestures from parametric archetypes — randomised amplitude, timing and side, so they never repeat."
               />
               <Toggle
+                label="Facial Expression"
+                checked={settings.facialExpression}
+                onChange={(v) => set('facialExpression', v)}
+                hint="Drives smile/brow/eye blendshapes from the same emotion. Needs a model that has them — VRoid, ARKit and ReadyPlayerMe naming are all recognised."
+              />
+              <Toggle
                 label="Match Emotion To Replies"
                 checked={settings.emotionFromReply}
                 onChange={(v) => set('emotionFromReply', v)}
@@ -1038,6 +1134,15 @@ export default function SettingsDrawer({
                 hint="Speaks a short greeting locally — no API call, no cost."
               />
               <div className="mt-2 space-y-2">
+                <Slider
+                  label="Expression Intensity"
+                  value={settings.expressionIntensity}
+                  min={0}
+                  max={1.6}
+                  step={0.05}
+                  onChange={(v) => set('expressionIntensity', v)}
+                  format={(v) => `${Math.round(v * 100)}%`}
+                />
                 <Slider
                   label="Gesture Intensity"
                   value={settings.gestureIntensity}
