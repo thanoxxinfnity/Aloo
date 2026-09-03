@@ -124,6 +124,7 @@ export default function AlooViewport() {
   const {
     settings,
     set,
+    update,
     reset,
     messages,
     streaming,
@@ -487,6 +488,7 @@ export default function AlooViewport() {
           onClose={() => setDrawerOpen(false)}
           settings={settings}
           set={set}
+          update={update}
           reset={reset}
           riggingReport={riggingReport}
           modelStatus={modelStatus}

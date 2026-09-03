@@ -138,25 +138,55 @@ function Slider({ label, value, min, max, step, onChange, format }) {
 
 function SecretInput({ value, onChange, placeholder }) {
   const [visible, setVisible] = useState(false);
+  const has = !!value;
+
   return (
-    <div className="relative">
-      <input
-        type={visible ? 'text' : 'password'}
-        className="hud-input pr-9"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        autoComplete="off"
-        spellCheck={false}
-      />
-      <button
-        type="button"
-        onClick={() => setVisible((v) => !v)}
-        className="absolute right-2 top-1/2 -translate-y-1/2 text-cyan-300/40 transition hover:text-cyan-200"
-        title={visible ? 'Hide' : 'Reveal'}
-      >
-        {visible ? <EyeOff size={12} /> : <Eye size={12} />}
-      </button>
+    <div>
+      <div className="relative">
+        <input
+          type={visible ? 'text' : 'password'}
+          className={`hud-input pr-16 ${has ? '!border-emerald-400/50' : ''}`}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          // Password fields on Android sometimes refuse a paste from the
+          // clipboard bar; inputMode text keeps the normal keyboard and paste.
+          inputMode="text"
+        />
+        <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1.5">
+          {has && (
+            <button
+              type="button"
+              onClick={() => onChange('')}
+              title="Clear this key"
+              className="text-cyan-300/35 transition hover:text-pink-300"
+            >
+              <X size={11} />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setVisible((v) => !v)}
+            className="text-cyan-300/40 transition hover:text-cyan-200"
+            title={visible ? 'Hide' : 'Reveal'}
+          >
+            {visible ? <EyeOff size={12} /> : <Eye size={12} />}
+          </button>
+        </div>
+      </div>
+
+      {/* Explicit confirmation. A masked field looks identical whether it holds
+          a key or nothing, which is exactly how a saved key comes to look lost. */}
+      {has && (
+        <div className="mt-1 flex items-center gap-1 text-[9px] text-emerald-300/80">
+          <Check size={9} />
+          Saved · {value.length} chars, ends &ldquo;{value.slice(-4)}&rdquo;
+        </div>
+      )}
     </div>
   );
 }
@@ -322,15 +352,18 @@ function AddModelRow({ kind, onUpload, onAddUrl }) {
   const [url, setUrl] = useState('');
   const [busy, setBusy] = useState(false);
 
+  const [localError, setLocalError] = useState(null);
+
   const pick = async (e) => {
     const file = e.target.files?.[0];
     e.target.value = ''; // allow re-picking the same file after a failure
     if (!file) return;
+    setLocalError(null);
     setBusy(true);
     try {
       await onUpload(file, kind);
-    } catch {
-      /* the hook surfaces the message */
+    } catch (err) {
+      setLocalError(err.message);
     } finally {
       setBusy(false);
     }
@@ -356,9 +389,23 @@ function AddModelRow({ kind, onUpload, onAddUrl }) {
         title="Pick a .glb from this device — it is stored locally and works offline"
       >
         <Upload size={11} />
-        Add {kind === 'avatar' ? 'avatar' : 'environment'} from device
-        <input type="file" accept=".glb,.gltf,model/gltf-binary" className="hidden" onChange={pick} disabled={busy} />
+        {busy ? 'Importing…' : `Add ${kind === 'avatar' ? 'avatar' : 'environment'} from device`}
+        {/*
+          accept="*<!---->/*" ON PURPOSE. Android has no registered MIME type for
+          .glb, so an accept list of ".glb,.gltf,model/gltf-binary" makes the
+          system document picker match NOTHING — the user sees an empty "Recent"
+          screen and cannot select their model at all. Accepting everything and
+          validating the extension in JS is the only combination that works on
+          both Android and desktop.
+        */}
+        <input type="file" accept="*/*" className="hidden" onChange={pick} disabled={busy} />
       </label>
+      <p className="text-[8.5px] leading-relaxed text-cyan-300/30">
+        Pick any <code className="text-cyan-300/60">.glb</code> or{' '}
+        <code className="text-cyan-300/60">.gltf</code>. On Android the picker opens on
+        &ldquo;Recent&rdquo;, which is often empty — tap the ☰ menu and browse to
+        <span className="text-cyan-300/50"> Downloads</span> or your device storage.
+      </p>
 
       <div className="flex gap-1.5">
         <input
@@ -373,6 +420,13 @@ function AddModelRow({ kind, onUpload, onAddUrl }) {
           <Link2 size={11} />
         </button>
       </div>
+
+      {localError && (
+        <div className="flex items-start gap-1.5 rounded border border-pink-400/25 bg-pink-400/5 p-1.5">
+          <AlertTriangle size={10} className="mt-0.5 shrink-0 text-pink-400/80" />
+          <span className="flex-1 text-[9px] leading-relaxed text-pink-100/75">{localError}</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -386,17 +440,56 @@ export default function SettingsDrawer({
   onClose,
   settings,
   set,
+  update,
   reset,
   riggingReport,
   modelStatus,
   library,
 }) {
   const [voices, setVoices] = useState([]);
+  const [storageOk, setStorageOk] = useState(true);
 
   useEffect(() => {
     if (!open) return;
     waitForVoices().then(setVoices);
   }, [open]);
+
+  // Verify persistence for real rather than assuming it: a blocked localStorage
+  // is silent, and the symptom is "my key disappeared after restarting".
+  useEffect(() => {
+    try {
+      const probe = '__aloo_probe__';
+      window.localStorage.setItem(probe, '1');
+      window.localStorage.removeItem(probe);
+      setStorageOk(true);
+    } catch {
+      setStorageOk(false);
+    }
+  }, []);
+
+  const activeKeyPresent =
+    settings.provider === PROVIDERS.NVIDIA ? !!settings.nvidiaApiKey : !!settings.geminiApiKey;
+  const anyKeyPresent = !!settings.nvidiaApiKey || !!settings.geminiApiKey;
+
+  /**
+   * Save a key and, if the currently active provider has no key of its own,
+   * switch to the one just configured. Entering a key is an unambiguous signal
+   * that the user wants to use that provider.
+   */
+  const saveKey = (field, raw, provider) => {
+    const value = String(raw || '').trim();
+    const other = field === 'nvidiaApiKey' ? settings.geminiApiKey : settings.nvidiaApiKey;
+    const activeHasKey =
+      settings.provider === PROVIDERS.NVIDIA ? !!settings.nvidiaApiKey : !!settings.geminiApiKey;
+
+    if (value && !activeHasKey && settings.provider !== provider) {
+      update({ [field]: value, provider });
+    } else if (value && !other && settings.provider !== provider) {
+      update({ [field]: value, provider });
+    } else {
+      set(field, value);
+    }
+  };
 
   const visionOk = VISION_CAPABLE.includes(
     settings.provider === PROVIDERS.NVIDIA ? settings.nvidiaModel : settings.geminiModel
@@ -517,10 +610,17 @@ export default function SettingsDrawer({
           <Section
             icon={KeyRound}
             title="API Keys"
+            // Open by default until at least one key exists: this is the one
+            // thing a new operator MUST do, and a collapsed section hides it.
+            defaultOpen={!settings.nvidiaApiKey && !settings.geminiApiKey}
             badge={
-              (settings.provider === PROVIDERS.NVIDIA ? settings.nvidiaApiKey : settings.geminiApiKey) ? (
+              activeKeyPresent ? (
                 <span className="rounded border border-emerald-400/40 bg-emerald-400/10 px-1 text-[8px] text-emerald-300">
-                  SET
+                  ACTIVE
+                </span>
+              ) : anyKeyPresent ? (
+                <span className="rounded border border-amber-400/40 bg-amber-400/10 px-1 text-[8px] text-amber-300">
+                  WRONG PROVIDER
                 </span>
               ) : (
                 <span className="rounded border border-pink-400/40 bg-pink-400/10 px-1 text-[8px] text-pink-300">
@@ -535,7 +635,7 @@ export default function SettingsDrawer({
             >
               <SecretInput
                 value={settings.nvidiaApiKey}
-                onChange={(v) => set('nvidiaApiKey', v.trim())}
+                onChange={(v) => saveKey('nvidiaApiKey', v, PROVIDERS.NVIDIA)}
                 placeholder="nvapi-…"
               />
             </Field>
@@ -543,10 +643,48 @@ export default function SettingsDrawer({
             <Field label="Google Gemini API Key" hint="aistudio.google.com/app/apikey">
               <SecretInput
                 value={settings.geminiApiKey}
-                onChange={(v) => set('geminiApiKey', v.trim())}
+                onChange={(v) => saveKey('geminiApiKey', v, PROVIDERS.GEMINI)}
                 placeholder="AIza…"
               />
             </Field>
+
+            {/* The most common "my key vanished" report is actually a key saved
+                for the provider that is not selected: the badge stays MISSING
+                and the HUD keeps saying AWAITING KEY. Say so, and offer the fix. */}
+            {!activeKeyPresent && anyKeyPresent && (
+              <div className="flex items-start gap-1.5 rounded border border-amber-400/30 bg-amber-400/10 p-2">
+                <AlertTriangle size={11} className="mt-0.5 shrink-0 text-amber-400" />
+                <div className="flex-1">
+                  <p className="text-[9.5px] leading-relaxed text-amber-100/80">
+                    Your key is saved, but the active provider is{' '}
+                    <b>{settings.provider === PROVIDERS.NVIDIA ? 'NVIDIA NIM' : 'Gemini'}</b>, which
+                    has no key — so ALOO still shows &ldquo;awaiting key&rdquo;.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      set(
+                        'provider',
+                        settings.nvidiaApiKey ? PROVIDERS.NVIDIA : PROVIDERS.GEMINI
+                      )
+                    }
+                    className="hud-btn hud-btn-active mt-1.5 !py-1"
+                  >
+                    Switch to {settings.nvidiaApiKey ? 'NVIDIA NIM' : 'Gemini'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {!storageOk && (
+              <div className="flex items-start gap-1.5 rounded border border-pink-400/30 bg-pink-400/10 p-2">
+                <AlertTriangle size={11} className="mt-0.5 shrink-0 text-pink-400" />
+                <span className="text-[9.5px] leading-relaxed text-pink-100/80">
+                  This browser is blocking local storage, so keys cannot be remembered between
+                  sessions. Private/incognito mode and &ldquo;block site data&rdquo; both do this.
+                </span>
+              </div>
+            )}
 
             <Field
               label="Tavily Search Key (optional)"
@@ -860,6 +998,54 @@ export default function SettingsDrawer({
               onChange={(v) => set('aPoseAngle', v)}
               format={(v) => `${v}°`}
             />
+
+            <div className="rounded border border-cyan-400/12 bg-black/25 p-2">
+              <span className="hud-label mb-1.5 block">Presence</span>
+              <Toggle
+                label="Idle Look-Around"
+                checked={settings.idleLookAround}
+                onChange={(v) => set('idleLookAround', v)}
+                hint="Glances away and back on an irregular timer. Without this she stares."
+              />
+              <Toggle
+                label="Weight Shift"
+                checked={settings.weightShift}
+                onChange={(v) => set('weightShift', v)}
+                hint="Slow hip roll — nobody stands perfectly still."
+              />
+              <Toggle
+                label="React To Tap"
+                checked={settings.tapReaction}
+                onChange={(v) => set('tapReaction', v)}
+                hint="Tap or click her: she turns to look at the spot and waves."
+              />
+              <Toggle
+                label="Greet Out Loud On Tap"
+                checked={settings.speakOnTap}
+                onChange={(v) => set('speakOnTap', v)}
+                hint="Speaks a short greeting locally — no API call, no cost."
+              />
+              <div className="mt-2 space-y-2">
+                <Slider
+                  label="Elbow Bend"
+                  value={settings.elbowBend}
+                  min={0}
+                  max={35}
+                  step={1}
+                  onChange={(v) => set('elbowBend', v)}
+                  format={(v) => `${v}°`}
+                />
+                <Slider
+                  label="Finger Curl"
+                  value={settings.fingerCurl}
+                  min={0}
+                  max={40}
+                  step={1}
+                  onChange={(v) => set('fingerCurl', v)}
+                  format={(v) => `${v}°`}
+                />
+              </div>
+            </div>
 
             <div className="rounded border border-cyan-400/12 bg-black/25 p-2">
               <span className="hud-label mb-1.5 block">Jaw Lip-Sync</span>

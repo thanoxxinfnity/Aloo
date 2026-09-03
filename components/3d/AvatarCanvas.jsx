@@ -37,7 +37,15 @@ import * as THREE from 'three';
 import SpaceBackground from './SpaceBackground';
 import CameraController from './CameraController';
 import { validateModelRigging, buildMorphIndex, applyMorph, findBone } from './RiggingValidator';
-import { lipSync, VISEMES, startIdleAnimation } from '@/services/ttsLipSyncService';
+import { lipSync, VISEMES, startIdleAnimation, speak } from '@/services/ttsLipSyncService';
+import {
+  mood,
+  startIdleAttention,
+  poke,
+  waveProgress,
+  pokeAttention,
+  randomGreeting,
+} from '@/lib/avatarMood';
 
 /* -------------------------------------------------------------------------- */
 /* Loader configuration                                                        */
@@ -73,6 +81,50 @@ function configureLoader(loader) {
  *
  * Returns a unit Vector3 in bone-local space, or null when there is no jaw.
  */
+/**
+ * Every finger joint in the rig, excluding thumbs (which curl on a different
+ * axis and look wrong under a uniform curl).
+ */
+/**
+ * Distinguish a TAP from a camera DRAG.
+ *
+ * OrbitControls and the avatar share the same canvas, so a pointerdown on her
+ * body is both "she was touched" and "start rotating the view". Reacting on
+ * pointerdown alone means every camera drag makes her wave. So we record the
+ * press, and only count it as a tap if the release comes quickly and close by.
+ */
+function useTapGesture(onTap, enabled) {
+  const down = useRef(null);
+
+  const onPointerDown = (e) => {
+    if (!enabled) return;
+    down.current = { t: performance.now(), x: e.nativeEvent?.clientX ?? 0, y: e.nativeEvent?.clientY ?? 0 };
+  };
+
+  const onPointerUp = (e) => {
+    if (!enabled || !down.current) return;
+    const dt = performance.now() - down.current.t;
+    const dx = (e.nativeEvent?.clientX ?? 0) - down.current.x;
+    const dy = (e.nativeEvent?.clientY ?? 0) - down.current.y;
+    down.current = null;
+    // 400ms and 10px: comfortably inside a deliberate tap, comfortably outside
+    // the shortest camera drag anyone performs on purpose.
+    if (dt < 400 && Math.hypot(dx, dy) < 10) onTap(e);
+  };
+
+  return { onPointerDown, onPointerUp, onPointerCancel: () => { down.current = null; } };
+}
+
+function collectFingerBones(scene) {
+  const out = [];
+  scene.traverse((n) => {
+    if (!n.isBone) return;
+    const norm = n.name.toLowerCase();
+    if (/(index|middle|ring|pinky)[0-9]/.test(norm)) out.push(n);
+  });
+  return out;
+}
+
 function jawOpenAxis(scene, jaw) {
   if (!jaw) return null;
   // getWorldQuaternion is only meaningful once the matrices are current.
@@ -131,7 +183,11 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
         rightArm: findBone(scene, ['rightarm', 'rupperarm', 'upperarmr']),
         leftForeArm: findBone(scene, ['leftforearm', 'lforearm']),
         rightForeArm: findBone(scene, ['rightforearm', 'rforearm']),
+        hips: findBone(scene, ['hips', 'pelvis']),
       },
+      // Finger joints, collected once. Flat splayed hands are one of the
+      // strongest "this is a mannequin" cues; a relaxed curl fixes it for free.
+      fingers: collectFingerBones(scene),
       jawAxis: jawOpenAxis(scene, findBone(scene, ['jaw'])),
       // Which mouth channel do we actually have? Decided once, not per frame.
       hasVisemes: report.visemeChecks.found.length >= 4,
@@ -253,8 +309,27 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
     // The jaw is driven by quaternion (arbitrary hinge axis), so it needs its
     // rest orientation in the same form.
     if (rig.bones.jaw) snap.jawQuat = rig.bones.jaw.quaternion.clone();
+
+    // RELAXED HANDS. A bind pose leaves fingers dead straight, which reads as a
+    // shop dummy. A gentle curl, stronger toward the fingertips, is what a hand
+    // does at rest. Applied once here so it becomes part of the rest pose.
+    const curl = THREE.MathUtils.degToRad(settings.fingerCurl ?? 12);
+    if (curl > 0) {
+      rig.fingers.forEach((bone) => {
+        if (bone.userData.__alooBindX === undefined) {
+          bone.userData.__alooBindX = bone.rotation.x;
+        }
+        // Joint index 1/2/3 — distal joints curl more than knuckles.
+        const depth = Number((bone.name.match(/([0-9])$/) || [])[1] || 1);
+        bone.rotation.x = bone.userData.__alooBindX + curl * (0.6 + depth * 0.35);
+      });
+    }
+
+    snap.fingers = rig.fingers.map((b) => b.rotation.clone());
+    if (rig.bones.hips) snap.hips = rig.bones.hips.rotation.clone();
+    if (rig.bones.hips) snap.hipsPos = rig.bones.hips.position.clone();
     return snap;
-  }, [rig, gltf.animations, settings.autoAPose, settings.aPoseAngle]);
+  }, [rig, gltf.animations, settings.autoAPose, settings.aPoseAngle, settings.fingerCurl]);
 
   useEffect(() => {
     onReport?.(rig.report);
@@ -281,6 +356,26 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
   useFrame((state, delta) => {
     const f = lipSync.frame;
     const t = state.clock.elapsedTime;
+    const now = performance.now();
+
+    /* ---- 0. Where is her attention? ----------------------------------------
+       Blending three sources rather than tracking the pointer directly is what
+       stops the stare: `mood.attention` flips to 'away' on an irregular timer,
+       and a recent tap overrides everything for a couple of seconds. */
+    const wave = settings.tapReaction === false ? 0 : waveProgress(now);
+    const pokeWeight = settings.tapReaction === false ? 0 : pokeAttention(now);
+
+    let gazeX = pointer.x;
+    let gazeY = pointer.y;
+    if (mood.attention === 'away' && settings.idleLookAround !== false) {
+      gazeX = mood.gaze.x;
+      gazeY = mood.gaze.y;
+    }
+    if (pokeWeight > 0) {
+      // Look at where she was touched, easing back to the pointer.
+      gazeX = THREE.MathUtils.lerp(gazeX, THREE.MathUtils.clamp(mood.pokePoint.x * 2.2, -1, 1), pokeWeight);
+      gazeY = THREE.MathUtils.lerp(gazeY, THREE.MathUtils.clamp((mood.pokePoint.y - 1.5) * 2, -1, 1), pokeWeight);
+    }
 
     /* ---- 1. Mouth --------------------------------------------------------- */
     if (rig.hasVisemes) {
@@ -324,14 +419,14 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
     if (settings.eyeTracking !== false) {
       const sacX = Math.sin(t * 0.83) * 0.02 + Math.sin(t * 2.7) * 0.006;
       const sacY = Math.cos(t * 0.61) * 0.014;
-      const gazeY = THREE.MathUtils.clamp(pointer.x * 0.28, -0.35, 0.35) + sacX;
-      const gazeX = THREE.MathUtils.clamp(-pointer.y * 0.18, -0.22, 0.22) + sacY;
+      const eyeYaw = THREE.MathUtils.clamp(gazeX * 0.28, -0.35, 0.35) + sacX;
+      const eyePitch = THREE.MathUtils.clamp(-gazeY * 0.18, -0.22, 0.22) + sacY;
       for (const key of ['leftEye', 'rightEye']) {
         const bone = rig.bones[key];
         const r = rest[key];
         if (!bone || !r) continue;
-        bone.rotation.y = THREE.MathUtils.lerp(bone.rotation.y, r.y + gazeY, delta * 8);
-        bone.rotation.x = THREE.MathUtils.lerp(bone.rotation.x, r.x + gazeX, delta * 8);
+        bone.rotation.y = THREE.MathUtils.lerp(bone.rotation.y, r.y + eyeYaw, delta * 8);
+        bone.rotation.x = THREE.MathUtils.lerp(bone.rotation.x, r.x + eyePitch, delta * 8);
       }
     }
 
@@ -339,8 +434,10 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
     // Pointer is normalised device coords (-1..1). Clamped so the neck never
     // exceeds a believable range.
     if (rig.bones.head && rest.head) {
-      const targetY = THREE.MathUtils.clamp(pointer.x * 0.42, -0.5, 0.5);
-      const targetX = THREE.MathUtils.clamp(-pointer.y * 0.26, -0.3, 0.3);
+      const targetY = THREE.MathUtils.clamp(gazeX * 0.42, -0.5, 0.5);
+      const targetX = THREE.MathUtils.clamp(-gazeY * 0.26, -0.3, 0.3);
+      // A touched person turns their head sharply, then settles.
+      const track = 3.2 + pokeWeight * 6;
 
       // Speech emphasis. On a rig WITH a mouth this is a light rhythmic nod so
       // the head is not embalmed. On a rig with NO face controls it becomes the
@@ -354,12 +451,12 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
       rig.bones.head.rotation.y = THREE.MathUtils.lerp(
         rig.bones.head.rotation.y,
         rest.head.y + targetY + turn,
-        delta * 3.2
+        delta * track
       );
       rig.bones.head.rotation.x = THREE.MathUtils.lerp(
         rig.bones.head.rotation.x,
         rest.head.x + targetX + nod,
-        delta * 3.2
+        delta * track
       );
       rig.bones.head.rotation.z = THREE.MathUtils.lerp(
         rig.bones.head.rotation.z,
@@ -372,7 +469,7 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
       // makes a look-at read as a body turning rather than a head swivelling.
       rig.bones.neck.rotation.y = THREE.MathUtils.lerp(
         rig.bones.neck.rotation.y,
-        rest.neck.y + pointer.x * 0.14,
+        rest.neck.y + gazeX * 0.14,
         delta * 2.4
       );
     }
@@ -407,19 +504,58 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
         delta * 2.4
       );
     }
-    if (rig.bones.leftForeArm && rest.leftForeArm) {
+    // Elbows. A straight arm is another mannequin cue; real arms rest with a
+    // slight bend. Skipped while waving, which drives the forearm itself.
+    const bend = THREE.MathUtils.degToRad(settings.elbowBend ?? 11);
+    if (wave === 0 && rig.bones.leftForeArm && rest.leftForeArm) {
       rig.bones.leftForeArm.rotation.y = THREE.MathUtils.lerp(
         rig.bones.leftForeArm.rotation.y,
-        rest.leftForeArm.y + gesture * 0.7 * Math.sin(t * 2.3),
+        rest.leftForeArm.y + bend + gesture * 0.7 * Math.sin(t * 2.3),
         delta * 2.2
       );
     }
-    if (rig.bones.rightForeArm && rest.rightForeArm) {
+    if (wave === 0 && rig.bones.rightForeArm && rest.rightForeArm) {
       rig.bones.rightForeArm.rotation.y = THREE.MathUtils.lerp(
         rig.bones.rightForeArm.rotation.y,
-        rest.rightForeArm.y - gesture * 0.7 * Math.sin(t * 2.3 + 0.6),
+        rest.rightForeArm.y - bend - gesture * 0.7 * Math.sin(t * 2.3 + 0.6),
         delta * 2.2
       );
+    }
+
+    /* ---- 4c. Weight shift ---------------------------------------------------
+       Nobody stands perfectly still. A slow hip roll with a matching lateral
+       drift reads as shifting weight from one leg to the other; two different
+       periods keep it from looking like a metronome. */
+    if (rig.bones.hips && rest.hips && rest.hipsPos && settings.weightShift !== false) {
+      const shift = Math.sin(t * 0.34);
+      rig.bones.hips.rotation.z = rest.hips.z + shift * 0.028;
+      rig.bones.hips.rotation.y = rest.hips.y + Math.sin(t * 0.21) * 0.03;
+      // Position is in the rig's own units, so scale the drift by the fit.
+      rig.bones.hips.position.x = rest.hipsPos.x + shift * 0.012 / (fit.scale || 1);
+    }
+
+    /* ---- 4d. Greeting wave --------------------------------------------------
+       Triggered by tapping the avatar. Raises the right arm and oscillates the
+       forearm, then eases back — layered on top of whatever else is running. */
+    if (wave > 0 && rig.bones.rightArm && rest.rightArm) {
+      // Rise over the first 25%, hold, fall over the last 30%.
+      const env = Math.min(1, wave / 0.25) * Math.min(1, (1 - wave) / 0.3);
+      rig.bones.rightArm.rotation.z = THREE.MathUtils.lerp(
+        rig.bones.rightArm.rotation.z,
+        rest.rightArm.z - 1.35 * env,
+        delta * 9
+      );
+      rig.bones.rightArm.rotation.x = THREE.MathUtils.lerp(
+        rig.bones.rightArm.rotation.x,
+        rest.rightArm.x - 0.35 * env,
+        delta * 9
+      );
+      if (rig.bones.rightForeArm && rest.rightForeArm) {
+        rig.bones.rightForeArm.rotation.y =
+          rest.rightForeArm.y + Math.sin(wave * Math.PI * 6) * 0.55 * env;
+        rig.bones.rightForeArm.rotation.z =
+          rest.rightForeArm.z - 0.7 * env;
+      }
     }
 
     /* ---- 5. Whole-body micro-sway ------------------------------------------ */
@@ -429,11 +565,21 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
     }
   });
 
+  /**
+   * Tapping the character makes her look at the touch point and wave. r3f gives
+   * the hit position in world space; the mood bus wants it in the same metric
+   * space the camera presets use, which after auto-fit is simply world metres.
+   */
+  const tap = useTapGesture((e) => {
+    poke({ x: e.point.x, y: e.point.y, z: e.point.z });
+    if (settings.speakOnTap) speak(randomGreeting());
+  }, settings.tapReaction !== false);
+
   return (
     <group ref={group} position={offset} scale={scale} dispose={null}>
       {/* Inner group carries the measured auto-fit transform; the outer group
           carries the user's own scale/offset, so the two never fight. */}
-      <group position={fit.offset} scale={fit.scale}>
+      <group position={fit.offset} scale={fit.scale} {...tap}>
         <primitive object={scene} />
       </group>
     </group>
@@ -449,7 +595,7 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
  * it consumes the same `lipSync.frame` (mouth, blink, energy) so voice, vision
  * and lip-sync are all demonstrable before the user supplies any model.
  */
-function HoloAvatar({ scale, offset }) {
+function HoloAvatar({ scale, offset, settings = {} }) {
   const group = useRef();
   const mouth = useRef();
   const eyeL = useRef();
@@ -511,6 +657,26 @@ function HoloAvatar({ scale, offset }) {
   useFrame((state, delta) => {
     const f = lipSync.frame;
     const t = state.clock.elapsedTime;
+    const now = performance.now();
+
+    /* ---- 0. Where is her attention? ----------------------------------------
+       Blending three sources rather than tracking the pointer directly is what
+       stops the stare: `mood.attention` flips to 'away' on an irregular timer,
+       and a recent tap overrides everything for a couple of seconds. */
+    const wave = settings.tapReaction === false ? 0 : waveProgress(now);
+    const pokeWeight = settings.tapReaction === false ? 0 : pokeAttention(now);
+
+    let gazeX = pointer.x;
+    let gazeY = pointer.y;
+    if (mood.attention === 'away' && settings.idleLookAround !== false) {
+      gazeX = mood.gaze.x;
+      gazeY = mood.gaze.y;
+    }
+    if (pokeWeight > 0) {
+      // Look at where she was touched, easing back to the pointer.
+      gazeX = THREE.MathUtils.lerp(gazeX, THREE.MathUtils.clamp(mood.pokePoint.x * 2.2, -1, 1), pokeWeight);
+      gazeY = THREE.MathUtils.lerp(gazeY, THREE.MathUtils.clamp((mood.pokePoint.y - 1.5) * 2, -1, 1), pokeWeight);
+    }
 
     // Mouth: a light bar whose height tracks mouthOpen and whose width tracks
     // spectral brightness — wide+flat for "ee", tall+narrow for "oh".
@@ -528,11 +694,13 @@ function HoloAvatar({ scale, offset }) {
     if (eyeL.current) eyeL.current.scale.y = lid;
     if (eyeR.current) eyeR.current.scale.y = lid;
 
-    // Core pulse — idle heartbeat, spikes with vocal energy.
+    // Core pulse — idle heartbeat, spikes with vocal energy, and flares when
+    // tapped so the procedural avatar acknowledges touch too.
     if (core.current) {
-      const pulse = 1 + Math.sin(t * 2.1) * 0.05 + f.energy * 0.28;
+      const flare = wave > 0 ? Math.sin(wave * Math.PI) : 0;
+      const pulse = 1 + Math.sin(t * 2.1) * 0.05 + f.energy * 0.28 + flare * 0.5;
       core.current.scale.setScalar(pulse);
-      core.current.material.emissiveIntensity = 1.4 + f.energy * 3;
+      core.current.material.emissiveIntensity = 1.4 + f.energy * 3 + flare * 4;
     }
 
     // Counter-rotating HUD rings.
@@ -542,20 +710,25 @@ function HoloAvatar({ scale, offset }) {
     if (group.current) {
       group.current.rotation.y = THREE.MathUtils.lerp(
         group.current.rotation.y,
-        pointer.x * 0.3,
-        delta * 2.6
+        gazeX * 0.3,
+        delta * (2.6 + pokeWeight * 5)
       );
       group.current.rotation.x = THREE.MathUtils.lerp(
         group.current.rotation.x,
-        -pointer.y * 0.12,
-        delta * 2.6
+        -gazeY * 0.12,
+        delta * (2.6 + pokeWeight * 5)
       );
       group.current.position.y = offset[1] + Math.sin(t * 0.85) * 0.03;
     }
   });
 
+  const tap = useTapGesture((e) => {
+    poke({ x: e.point.x, y: e.point.y, z: e.point.z });
+    if (settings.speakOnTap) speak(randomGreeting());
+  }, settings.tapReaction !== false);
+
   return (
-    <group ref={group} position={offset} scale={scale}>
+    <group ref={group} position={offset} scale={scale} {...tap}>
       <Float speed={1.1} rotationIntensity={0.14} floatIntensity={0.32}>
         {/* ---- Head ----
              Proportions are stylised but anchored to human scale: a 0.2m head
@@ -724,8 +897,14 @@ export default function AvatarCanvas({
   // Keep the blink/ease loop running for as long as the avatar is on screen.
   useEffect(() => startIdleAnimation(), []);
 
+  // The look-away scheduler is what stops the character staring unblinkingly.
+  useEffect(() => {
+    if (settings.idleLookAround === false) return undefined;
+    return startIdleAttention();
+  }, [settings.idleLookAround]);
+
   const useGlb = modelStatus === 'available' && !loadFailed;
-  const fallback = <HoloAvatar scale={scale} offset={offset} />;
+  const fallback = <HoloAvatar scale={scale} offset={offset} settings={settings} />;
 
   return (
     <Canvas
