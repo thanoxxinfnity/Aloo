@@ -166,6 +166,17 @@ export default function useAlooBrain() {
               prev.map((m) => (m.id === assistantId ? { ...m, content: accumulated } : m))
             );
           },
+          // The provider retired the selected model and the service picked a
+          // live one. The reply still arrives, so this is information rather
+          // than an error — relabel the bubble instead of raising a toast.
+          onNotice: (notice) => {
+            console.info('[ALOO]', notice);
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId ? { ...m, model: activeModel(), notice } : m
+              )
+            );
+          },
         });
 
         setMessages((prev) =>

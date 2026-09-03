@@ -50,6 +50,7 @@ import {
   VIEWPORT_MODES,
   VISION_CAPABLE,
 } from '@/lib/settingsStore';
+import { fetchNvidiaModels } from '@/lib/modelCatalog';
 import { STT_LANGUAGES } from '@/services/sttService';
 import { waitForVoices, speak, stopSpeaking } from '@/services/ttsLipSyncService';
 
@@ -151,44 +152,82 @@ function Slider({ label, value, min, max, step, onChange, format }) {
  *   1. onChange        — the normal path.
  *   2. onPaste         — re-read on the next tick, because the paste event
  *                        fires BEFORE the element's value is updated.
- *   3. a focus poll    — while the field is focused, any divergence between the
- *                        DOM and React state is adopted. This catches value
- *                        changes that fire no event at all, whatever caused them.
- *   4. a Paste button  — navigator.clipboard.readText(), bypassing the IME and
+ *   3. a poll          — any divergence between the DOM and React state is
+ *                        adopted. This catches value changes that fire no event
+ *                        at all, whatever caused them.
+ *   4. a Paste button  — reads the clipboard directly, bypassing the IME and
  *                        the paste event entirely. On a phone this is the path
  *                        that always works.
+ *
+ * THE POLL RUNS UNCONDITIONALLY, and that is the point.
+ * It used to be gated on `focused`, which left the exact window the bug lives
+ * in wide open: tapping Android's floating "Paste" chip moves focus to the
+ * overlay, so the field blurs, the poll stops, and the paste then lands in a
+ * DOM node nobody is watching. React re-renders from its stale state, writes
+ * `value` back over the element, and the key the user just pasted disappears.
+ * A 250ms interval on one text input costs nothing; the gate cost a whole
+ * class of silent data loss.
  */
 function SecretInput({ value, onChange, placeholder }) {
   const [visible, setVisible] = useState(false);
-  const [focused, setFocused] = useState(false);
   const [pasteMsg, setPasteMsg] = useState(null);
   const ref = useRef(null);
   const has = !!value;
 
-  // Path 3: adopt any DOM value React did not hear about.
+  // Path 3: adopt any DOM value React did not hear about — focused or not.
   useEffect(() => {
-    if (!focused) return undefined;
     const id = setInterval(() => {
       const el = ref.current;
       if (el && el.value !== value) onChange(el.value);
     }, 250);
     return () => clearInterval(id);
-  }, [focused, value, onChange]);
+  }, [value, onChange]);
 
   // Path 4: read the clipboard directly.
+  //
+  // Order matters. Inside the APK, `navigator.clipboard.readText()` usually
+  // rejects with NotAllowedError — Android WebView will not hand a page the
+  // system clipboard on request, whatever the page's origin. Capacitor's native
+  // Clipboard plugin has no such restriction because it reads through Java, so
+  // it is tried FIRST on device and the web API is the fallback, not the other
+  // way round.
   const pasteFromClipboard = async () => {
     setPasteMsg(null);
-    try {
-      const text = await navigator.clipboard.readText();
-      if (text && text.trim()) {
-        onChange(text.trim());
-        setPasteMsg({ ok: true, text: 'Pasted from clipboard' });
-      } else {
-        setPasteMsg({ ok: false, text: 'Clipboard is empty' });
+
+    const readNative = async () => {
+      const plugin = typeof window !== 'undefined' && window.Capacitor?.Plugins?.Clipboard;
+      if (!plugin?.read) return null;
+      const { value: text } = await plugin.read();
+      return typeof text === 'string' ? text : null;
+    };
+    const readWeb = async () => {
+      if (!navigator.clipboard?.readText) return null;
+      return navigator.clipboard.readText();
+    };
+
+    let text = null;
+    let lastErr = null;
+    for (const read of [readNative, readWeb]) {
+      try {
+        text = await read();
+        if (text != null) break;
+      } catch (err) {
+        lastErr = err;
       }
-    } catch {
-      // Denied or unsupported — long-press the field and use the system paste.
-      setPasteMsg({ ok: false, text: 'Clipboard blocked — long-press the field and paste' });
+    }
+
+    if (text && text.trim()) {
+      onChange(text.trim());
+      setPasteMsg({ ok: true, text: 'Pasted from clipboard' });
+    } else if (text != null) {
+      setPasteMsg({ ok: false, text: 'Clipboard is empty' });
+    } else {
+      setPasteMsg({
+        ok: false,
+        text: lastErr
+          ? 'Clipboard blocked — long-press the field and paste'
+          : 'Clipboard unavailable — long-press the field and paste',
+      });
     }
     setTimeout(() => setPasteMsg(null), 4000);
   };
@@ -208,11 +247,7 @@ function SecretInput({ value, onChange, placeholder }) {
             const el = e.currentTarget;
             setTimeout(() => onChange(el.value), 0);
           }}
-          onFocus={() => setFocused(true)}
-          onBlur={(e) => {
-            setFocused(false);
-            onChange(e.currentTarget.value);
-          }}
+          onBlur={(e) => onChange(e.currentTarget.value)}
           placeholder={placeholder}
           autoComplete="off"
           autoCorrect="off"
@@ -538,10 +573,24 @@ export default function SettingsDrawer({
 }) {
   const [voices, setVoices] = useState([]);
   const [storageOk, setStorageOk] = useState(true);
+  /* Seed list first so the picker is never empty, then swap in whatever NVIDIA
+     actually serves right now. Hard-coded ids rot — see lib/modelCatalog.js. */
+  const [nimCatalog, setNimCatalog] = useState({ models: NVIDIA_MODELS, live: false });
 
   useEffect(() => {
     if (!open) return;
     waitForVoices().then(setVoices);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    let alive = true;
+    fetchNvidiaModels().then((c) => {
+      if (alive) setNimCatalog(c);
+    });
+    return () => {
+      alive = false;
+    };
   }, [open]);
 
   // Verify persistence for real rather than assuming it: a blocked localStorage
@@ -652,13 +701,29 @@ export default function SettingsDrawer({
                 </select>
               </Field>
             ) : (
-              <Field label="NVIDIA NIM Model">
+              <Field
+                label="NVIDIA NIM Model"
+                hint={
+                  nimCatalog.live
+                    ? `${nimCatalog.models.length} models live from NVIDIA`
+                    : 'Built-in list (live catalogue unreachable)'
+                }
+              >
                 <select
                   className="hud-select"
                   value={settings.nvidiaModel}
                   onChange={(e) => set('nvidiaModel', e.target.value)}
                 >
-                  {NVIDIA_MODELS.map((m) => (
+                  {/* A saved id that is no longer served must still appear, or
+                      the select would silently show a DIFFERENT model than the
+                      one requests are actually using. Label it as retired. */}
+                  {!nimCatalog.models.includes(settings.nvidiaModel) && (
+                    <option value={settings.nvidiaModel}>
+                      {settings.nvidiaModel}
+                      {nimCatalog.live ? '  · retired' : ''}
+                    </option>
+                  )}
+                  {nimCatalog.models.map((m) => (
                     <option key={m} value={m}>
                       {m}
                       {VISION_CAPABLE.includes(m) ? '  · vision' : ''}
@@ -1079,10 +1144,14 @@ export default function SettingsDrawer({
               onChange={(v) => set('autoAPose', v)}
               hint="Rotates the upper-arm bones down out of the T-pose when the model ships no idle animation."
             />
+            {/* Minimum 45, not 0. Below that the A-pose correction stops doing
+                anything useful and the character stands splayed in her raw
+                T-pose — which reads as a broken model, not as a setting. Use the
+                Auto A-Pose toggle above to ask for the bind pose deliberately. */}
             <Slider
               label="Arm Rest Angle"
-              value={settings.aPoseAngle}
-              min={0}
+              value={Math.max(45, settings.aPoseAngle)}
+              min={45}
               max={90}
               step={1}
               onChange={(v) => set('aPoseAngle', v)}
@@ -1171,6 +1240,38 @@ export default function SettingsDrawer({
                   format={(v) => `${v}°`}
                 />
               </div>
+            </div>
+
+            <div className="rounded border border-cyan-400/12 bg-black/25 p-2">
+              <span className="hud-label mb-1.5 block">Palm Stars</span>
+              <Toggle
+                label="Star in each hand"
+                hint="A burning star hovering in both palms — it lights her hands and flares when she speaks."
+                checked={settings.handStars !== false}
+                onChange={(v) => set('handStars', v)}
+              />
+              {settings.handStars !== false && (
+                <div className="mt-1.5 space-y-1.5">
+                  <Slider
+                    label="Star Size"
+                    value={settings.handStarSize}
+                    min={0.012}
+                    max={0.09}
+                    step={0.002}
+                    onChange={(v) => set('handStarSize', v)}
+                    format={(v) => `${Math.round(v * 1000)}mm`}
+                  />
+                  <Slider
+                    label="Star Brightness"
+                    value={settings.handStarBrightness}
+                    min={0.2}
+                    max={2.5}
+                    step={0.05}
+                    onChange={(v) => set('handStarBrightness', v)}
+                    format={(v) => `${v.toFixed(2)}×`}
+                  />
+                </div>
+              )}
             </div>
 
             <div className="rounded border border-cyan-400/12 bg-black/25 p-2">

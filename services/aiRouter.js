@@ -25,27 +25,27 @@ export function providerLabel(s = getSettings()) {
  * Strips images when the selected model has no vision capability, so a webcam
  * frame can never 400 a text-only model.
  */
-export async function streamChat({ messages, onToken, signal, overrides = {} }) {
+export async function streamChat({ messages, onToken, onNotice, signal, overrides = {} }) {
   const s = { ...getSettings(), ...overrides };
   const payload = activeModelSupportsVision(s)
     ? messages
     : messages.map(({ images, ...rest }) => rest);
 
   if (s.provider === PROVIDERS.NVIDIA) {
-    return streamNimChat({ messages: payload, onToken, signal, overrides });
+    return streamNimChat({ messages: payload, onToken, onNotice, signal, overrides });
   }
-  return streamGeminiChat({ messages: payload, onToken, signal, overrides });
+  return streamGeminiChat({ messages: payload, onToken, onNotice, signal, overrides });
 }
 
 /** Blocking completion — used by the research planner and synthesiser. */
-export async function complete({ messages, overrides = {} }) {
+export async function complete({ messages, onNotice, overrides = {} }) {
   const s = { ...getSettings(), ...overrides };
   const payload = activeModelSupportsVision(s)
     ? messages
     : messages.map(({ images, ...rest }) => rest);
 
-  if (s.provider === PROVIDERS.NVIDIA) return completeNim({ messages: payload, overrides });
-  return completeGemini({ messages: payload, overrides });
+  if (s.provider === PROVIDERS.NVIDIA) return completeNim({ messages: payload, onNotice, overrides });
+  return completeGemini({ messages: payload, onNotice, overrides });
 }
 
 export { activeModel, activeModelSupportsVision };

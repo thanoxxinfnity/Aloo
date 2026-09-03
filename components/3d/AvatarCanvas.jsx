@@ -39,6 +39,7 @@ import * as THREE from 'three';
 
 import SpaceBackground from './SpaceBackground';
 import CameraController from './CameraController';
+import HandStars from './HandStars';
 import { validateModelRigging, buildMorphIndex, applyMorph, findBone } from './RiggingValidator';
 import { lipSync, VISEMES, startIdleAnimation, speak } from '@/services/ttsLipSyncService';
 import { director } from '@/lib/animationDirector';
@@ -245,6 +246,10 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
         hips: findBone(scene, ['hips', 'pelvis']),
         leftShoulder: findBone(scene, ['leftshoulder', 'lshoulder', 'shoulderl', 'leftclavicle']),
         rightShoulder: findBone(scene, ['rightshoulder', 'rshoulder', 'shoulderr', 'rightclavicle']),
+        // Anchors for the palm stars. Matched before the finger bones because
+        // `findBone` is a fuzzy match and "LeftHandIndex1" would otherwise win.
+        leftHand: findBone(scene, ['lefthand', 'lhand', 'handl', 'hand_l', 'wristl']),
+        rightHand: findBone(scene, ['righthand', 'rhand', 'handr', 'hand_r', 'wristr']),
       },
       // Finger joints, collected once. Flat splayed hands are one of the
       // strongest "this is a mannequin" cues; a relaxed curl fixes it for free.
@@ -712,6 +717,16 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
       <group position={fit.offset} scale={fit.scale} {...tap}>
         <primitive object={scene} />
       </group>
+
+      {/* Palm stars are siblings of the rig, not children of it: they track the
+          hand bones in world space so their size stays in real metres whatever
+          units the loaded model happens to use. See HandStars.jsx. */}
+      <HandStars
+        bones={rig.bones}
+        enabled={settings.handStars !== false}
+        size={settings.handStarSize ?? 0.035}
+        brightness={settings.handStarBrightness ?? 1}
+      />
     </group>
   );
 }

@@ -457,11 +457,40 @@ export function applyMorph(index, name, value) {
 }
 
 /** Find the first bone whose normalised name matches any alias. */
+/**
+ * Find a bone by alias.
+ *
+ * RESOLUTION ORDER IS THE WHOLE POINT, and getting it wrong is subtle enough to
+ * be worth spelling out. Aliases are matched by CONTAINMENT, so a short alias
+ * can be swallowed by an unrelated bone: `handr` (meant for "hand_R") is a
+ * substring of `lefthandring1`, so a naive scan hands you the left ring finger
+ * when you asked for the right hand — a wrong bone, not a missing one, which
+ * fails silently and looks like a rendering bug.
+ *
+ * So we resolve in three passes, each across the ENTIRE skeleton:
+ *   1. exact match, aliases in the caller's preference order,
+ *   2. prefix match — "RightHand" beats "RightHandRing1" for alias `righthand`,
+ *   3. containment, still alias-first.
+ *
+ * Alias order therefore expresses intent: the caller's first alias wins over a
+ * later one anywhere in the tree, rather than whichever bone happens to be
+ * traversed first.
+ */
 export function findBone(scene, aliases) {
-  let found = null;
+  const bones = [];
   scene.traverse((node) => {
-    if (found || !node.isBone) return;
-    if (matchesAlias(normalizeName(node.name), aliases)) found = node;
+    if (node.isBone) bones.push({ node, norm: normalizeName(node.name) });
   });
-  return found;
+
+  for (const test of [
+    (norm, alias) => norm === alias,
+    (norm, alias) => norm.startsWith(alias),
+    (norm, alias) => norm.includes(alias),
+  ]) {
+    for (const alias of aliases) {
+      const hit = bones.find((b) => test(b.norm, alias));
+      if (hit) return hit.node;
+    }
+  }
+  return null;
 }

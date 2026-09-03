@@ -99,13 +99,13 @@ export function toGeminiContents(messages) {
 }
 
 /** Stream a completion. Returns the full assembled reply. */
-export async function streamGeminiChat({ messages, onToken, signal, overrides = {} }) {
+export async function streamGeminiChat({ messages, onToken, onNotice, signal, overrides = {} }) {
   const s = { ...getSettings(), ...overrides };
 
   // The native HTTP bridge buffers responses — deliver one whole reply instead
   // of faking a stream.
   if (!supportsStreaming()) {
-    const full = await completeGemini({ messages, overrides });
+    const full = await completeGemini({ messages, onNotice, overrides });
     onToken?.(full, full);
     return full;
   }
@@ -125,7 +125,7 @@ export async function streamGeminiChat({ messages, onToken, signal, overrides = 
     body: JSON.stringify(req.body),
   });
 
-  if (!res.ok) throw new Error(await describeHttpError(res));
+  if (!res.ok) throw new Error(await describeHttpError(res, { model: s.geminiModel }));
 
   let full = '';
   await readSSE(
@@ -151,7 +151,7 @@ export async function streamGeminiChat({ messages, onToken, signal, overrides = 
 }
 
 /** Non-streaming variant — used where we need the whole answer at once. */
-export async function completeGemini({ messages, overrides = {} }) {
+export async function completeGemini({ messages, onNotice, overrides = {} }) {
   const s = { ...getSettings(), ...overrides };
 
   if (isNative() && !s.geminiApiKey) {
@@ -172,7 +172,7 @@ export async function completeGemini({ messages, overrides = {} }) {
     body: JSON.stringify(req.body),
   });
 
-  if (!res.ok) throw new Error(await describeHttpError(res));
+  if (!res.ok) throw new Error(await describeHttpError(res, { model: s.geminiModel }));
   const data = await res.json();
   return (data?.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
 }
