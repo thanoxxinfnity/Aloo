@@ -1249,38 +1249,6 @@ export default function SettingsDrawer({
             </div>
 
             <div className="rounded border border-cyan-400/12 bg-black/25 p-2">
-              <span className="hud-label mb-1.5 block">Palm Stars</span>
-              <Toggle
-                label="Star in each hand"
-                hint="A burning star hovering in both palms — it lights her hands and flares when she speaks."
-                checked={settings.handStars !== false}
-                onChange={(v) => set('handStars', v)}
-              />
-              {settings.handStars !== false && (
-                <div className="mt-1.5 space-y-1.5">
-                  <Slider
-                    label="Star Size"
-                    value={settings.handStarSize}
-                    min={0.012}
-                    max={0.09}
-                    step={0.002}
-                    onChange={(v) => set('handStarSize', v)}
-                    format={(v) => `${Math.round(v * 1000)}mm`}
-                  />
-                  <Slider
-                    label="Star Brightness"
-                    value={settings.handStarBrightness}
-                    min={0.2}
-                    max={2.5}
-                    step={0.05}
-                    onChange={(v) => set('handStarBrightness', v)}
-                    format={(v) => `${v.toFixed(2)}×`}
-                  />
-                </div>
-              )}
-            </div>
-
-            <div className="rounded border border-cyan-400/12 bg-black/25 p-2">
               <span className="hud-label mb-1.5 block">Jaw Lip-Sync</span>
               <Slider
                 label="Mouth Open Angle"

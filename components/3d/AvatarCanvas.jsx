@@ -39,7 +39,6 @@ import * as THREE from 'three';
 
 import SpaceBackground from './SpaceBackground';
 import CameraController from './CameraController';
-import HandStars from './HandStars';
 import { validateModelRigging, buildMorphIndex, applyMorph, findBone } from './RiggingValidator';
 import { lipSync, VISEMES, startIdleAnimation, speak } from '@/services/ttsLipSyncService';
 import { director } from '@/lib/animationDirector';
@@ -758,16 +757,6 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
       <group position={fit.offset} scale={fit.scale} {...tap}>
         <primitive object={scene} />
       </group>
-
-      {/* Palm stars are siblings of the rig, not children of it: they track the
-          hand bones in world space so their size stays in real metres whatever
-          units the loaded model happens to use. See HandStars.jsx. */}
-      <HandStars
-        bones={rig.bones}
-        enabled={settings.handStars !== false}
-        size={settings.handStarSize ?? 0.035}
-        brightness={settings.handStarBrightness ?? 1}
-      />
     </group>
   );
 }

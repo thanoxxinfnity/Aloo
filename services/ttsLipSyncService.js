@@ -33,6 +33,7 @@ import {
   setTtsVolume,
 } from '@/lib/audioGraph';
 import { getSettings } from '@/lib/settingsStore';
+import { isNative } from '@/lib/runtime';
 
 /* -------------------------------------------------------------------------- */
 /* Viseme vocabulary                                                           */
@@ -124,6 +125,9 @@ let timeline = null; // [{ viseme, start, end }] in ms, browser path only
 let timelineT0 = 0;
 let timelineRate = 1;
 let currentUtterance = null;
+// Identifies the in-flight NATIVE utterance. The plugin returns no handle, so
+// this is how a barge-in tells its own completion from a stale one's.
+let nativeSpeechToken = null;
 let currentSource = null; // AudioBufferSourceNode for the neural path
 let mode = 'idle'; // 'idle' | 'browser' | 'neural'
 let lastBlink = 0;
@@ -414,7 +418,83 @@ export async function speak(text, opts = {}) {
       console.warn('[ALOO/tts] Neural endpoint failed, falling back to browser TTS:', err);
     }
   }
+
+  /* INSIDE THE APK, `window.speechSynthesis` IS A TRAP.
+     Android's WebView exposes the object, so every feature check passes, but
+     `getVoices()` commonly returns an empty list and `speak()` then resolves
+     without producing a sound. From the app's side that is indistinguishable
+     from success: no error, no event, and the reply is simply never heard.
+     The native TTS plugin talks to the system engine directly and has none of
+     that, so on device it is tried first and the browser engine is the
+     fallback rather than the other way round. */
+  if (nativeTtsAvailable()) {
+    try {
+      await speakNative(clean, s);
+      return;
+    } catch (err) {
+      console.warn('[ALOO/tts] Native TTS failed, falling back to the WebView engine:', err);
+    }
+  }
+
   await speakBrowser(clean, s);
+}
+
+/** The Capacitor TextToSpeech plugin, if this build is running on a device. */
+function nativeTts() {
+  if (typeof window === 'undefined') return null;
+  return window.Capacitor?.Plugins?.TextToSpeech || null;
+}
+
+function nativeTtsAvailable() {
+  return isNative() && !!nativeTts()?.speak;
+}
+
+/**
+ * Path C: the device's own TTS engine.
+ *
+ * The plugin gives no word-boundary callbacks, which costs nothing here: the
+ * mouth was never driven by them. `textToVisemes` builds the whole predicted
+ * track up front and `onboundary` only ever RE-ANCHORED it to stop drift over
+ * a long paragraph. Without it the track free-runs, which is accurate enough
+ * across a sentence or two and is exactly what the neural path does too.
+ */
+async function speakNative(text, s) {
+  const plugin = nativeTts();
+
+  timeline = textToVisemes(text, 13.5 * (s.ttsRate || 1));
+  timelineT0 = performance.now();
+  timelineRate = 1;
+  mode = 'browser'; // same timeline-driven mouth mode
+  lipSync.frame.speaking = true;
+  emitSpeaking(true);
+  startLoop();
+
+  // A token so a barge-in can tell "my utterance finished" from "someone
+  // else's did" — the plugin has no per-utterance handle to compare.
+  const token = {};
+  nativeSpeechToken = token;
+
+  try {
+    await plugin.speak({
+      text,
+      lang: s.sttLanguage || 'en-US',
+      // The plugin's rate is a plain multiplier, same as the Web Speech API's.
+      rate: s.ttsRate ?? 1,
+      pitch: s.ttsPitch ?? 1,
+      volume: s.ttsVolume ?? 1,
+      category: 'playback',
+    });
+  } finally {
+    if (nativeSpeechToken === token) {
+      nativeSpeechToken = null;
+      timeline = null;
+      mode = 'idle';
+      setSynthetic(false);
+      lipSync.frame.speaking = false;
+      emitSpeaking(false);
+      stopLoopIfIdle();
+    }
+  }
 }
 
 /** Strip markdown / code so the voice doesn't read asterisks aloud. */
@@ -550,6 +630,15 @@ export function stopSpeaking() {
   if (typeof window !== 'undefined' && window.speechSynthesis) {
     currentUtterance = null;
     window.speechSynthesis.cancel();
+  }
+  // Barge-in on the device engine. Clearing the token first means the speak()
+  // promise that is about to reject knows it is stale and leaves the mouth
+  // state to whatever replaced it.
+  if (nativeSpeechToken) {
+    nativeSpeechToken = null;
+    nativeTts()?.stop?.().catch(() => {
+      /* nothing was speaking */
+    });
   }
   if (currentSource) {
     try {
