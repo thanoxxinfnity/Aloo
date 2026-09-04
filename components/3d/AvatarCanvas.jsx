@@ -1102,13 +1102,11 @@ export default function AvatarCanvas({
         toneMappingExposure: 1.05,
       }}
       /* FAR PLANE IS SET BY THE BACKDROP, NOT BY THE AVATAR.
-         The galaxy is placed ~820 units out (and further still on a narrow
-         phone, where it recedes to fit the width) because that distance is what
-         makes it read as a distant object rather than as wallpaper. A far plane
-         short of that clips it away ENTIRELY and silently: no error, no
-         artefact, just an empty sky — which is exactly what a `far: 900` did to
-         a galaxy that lands at ~1085 in portrait. 4000 leaves room for the
-         backdrop to be pushed further without this becoming a trap again.
+         A backdrop beyond the far plane is clipped away ENTIRELY and silently:
+         no error, no artefact, just an empty sky. That already cost one round
+         here, so the value is deliberately generous rather than fitted to the
+         current environment — a user-supplied model placed further out must not
+         re-open the same trap.
 
          Depth precision is unaffected in practice: the near plane sits at 0.2
          (orbit never lets the camera closer than 0.7), and every backdrop layer
@@ -1129,12 +1127,12 @@ export default function AvatarCanvas({
         rotationSpeed={settings.ambientRotationSpeed}
         particleDensity={settings.particleDensity}
         fitRadius={settings.spaceFitRadius}
+        offsetX={settings.spaceOffsetX ?? 0}
         offsetY={settings.spaceOffsetY}
         offsetZ={settings.spaceOffsetZ}
         tilt={settings.spaceTilt}
-        style={settings.backdrop ?? 'galaxy'}
-        galaxyStars={settings.galaxyStars ?? 90000}
-        galaxySpin={settings.galaxySpin ?? 0.9}
+        style={settings.backdrop ?? 'model'}
+        spacePointSize={settings.spacePointSize ?? 1.6}
       />
 
       <Suspense fallback={fallback}>

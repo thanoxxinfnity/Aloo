@@ -21,13 +21,12 @@ import { Stars, Sparkles } from '@react-three/drei';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as THREE from 'three';
 import useAssetAvailable from '@/hooks/useAssetAvailable';
-import Galaxy from './Galaxy';
 
 /* -------------------------------------------------------------------------- */
 /* A) User-supplied space.glb                                                  */
 /* -------------------------------------------------------------------------- */
 
-function SpaceModel({ url, rotationSpeed, opacity, fitRadius, offsetY, offsetZ, tilt }) {
+function SpaceModel({ url, rotationSpeed, opacity, fitRadius, offsetX, offsetY, offsetZ, tilt, pointSize }) {
   const gltf = useLoader(GLTFLoader, url);
   const group = useRef();
 
@@ -35,11 +34,36 @@ function SpaceModel({ url, rotationSpeed, opacity, fitRadius, offsetY, offsetZ, 
   const scene = useMemo(() => {
     const clone = gltf.scene.clone(true);
     clone.traverse((node) => {
-      if (!node.isMesh) return;
+      /* MATCH ANYTHING WITH A MATERIAL, NOT JUST MESHES.
+         This used to test `node.isMesh`, which silently skipped the bundled
+         environment entirely: it is a POINT CLOUD (glTF primitive mode 0), so
+         three builds a THREE.Points, and `isMesh` is false. Every fix below was
+         therefore never applied to it — and the one that mattered was `fog`.
+         The scene's fog ends at 90 units, the backdrop sits at ~190, so the
+         points were being blended 100% into the fog colour. The model loaded
+         fine, rendered fine, and came out solid black. */
+      const mats = node.material
+        ? (Array.isArray(node.material) ? node.material : [node.material])
+        : null;
+      if (!mats) return;
+
       node.frustumCulled = false;
-      const mats = Array.isArray(node.material) ? node.material : [node.material];
+
+      if (node.isPoints) {
+        // A star field authored as points carries no size of its own; three
+        // defaults to 1 world unit, which at this distance is a sub-pixel dot.
+        mats.forEach((m) => {
+          if (!m) return;
+          m.sizeAttenuation = true;
+          m.size = pointSize;
+        });
+      }
+
       mats.forEach((m) => {
         if (!m) return;
+        // The backdrop lies far beyond the fog's far plane; fogging it just
+        // erases it. It is meant to read as infinitely distant, not as haze.
+        m.fog = false;
         // A backdrop must never occlude the avatar or write into the depth
         // buffer, whatever its authored scale.
         m.depthWrite = false;
@@ -48,7 +72,6 @@ function SpaceModel({ url, rotationSpeed, opacity, fitRadius, offsetY, offsetZ, 
         // camera target. BackSide would render an open model inside-out.
         m.side = THREE.DoubleSide;
         m.toneMapped = false;
-        m.fog = false;
         if (opacity < 1) {
           m.transparent = true;
           m.opacity = opacity;
@@ -57,7 +80,7 @@ function SpaceModel({ url, rotationSpeed, opacity, fitRadius, offsetY, offsetZ, 
       node.renderOrder = -10;
     });
     return clone;
-  }, [gltf, opacity]);
+  }, [gltf, opacity, pointSize]);
 
   /* ---- Auto-fit -------------------------------------------------------------
      Exported environment models are rarely centred on the origin — this
@@ -86,7 +109,7 @@ function SpaceModel({ url, rotationSpeed, opacity, fitRadius, offsetY, offsetZ, 
   return (
     // Outer group: placement in the scene (pushed back, lifted, tilted so the
     // disc is seen at an angle instead of edge-on).
-    <group position={[0, offsetY, offsetZ]} rotation={[THREE.MathUtils.degToRad(tilt), 0, 0]}>
+    <group position={[offsetX, offsetY, offsetZ]} rotation={[THREE.MathUtils.degToRad(tilt), 0, 0]}>
       {/* Middle group spins slowly on the disc's own axis. */}
       <group ref={group}>
         {/* Inner group carries the measured normalisation. */}
@@ -248,48 +271,42 @@ export default function SpaceBackground({
   particleDensity = 1400,
   opacity = 1,
   fitRadius = 95,
+  offsetX = 0,
   offsetY = 14,
   offsetZ = -190,
   tilt = 24,
   /**
-   * 'galaxy' — the generated spiral galaxy (default). It is the only option
-   *            with DIFFERENTIAL rotation, so it is the only one that turns
-   *            like a real galaxy instead of a picture on a turntable.
-   * 'model'  — the supplied space.glb, rotated rigidly.
-   * 'stars'  — starfield and nebulae only.
+   * 'model' — the supplied environment GLB (default), shown on its own.
+   * 'stars' — the generated starfield, used when no model is available.
    */
-  style = 'galaxy',
-  galaxyStars = 90000,
-  galaxySpin = 0.9,
+  style = 'model',
+  /** World-unit size for an environment authored as a point cloud. */
+  spacePointSize = 1.6,
 }) {
   const status = useAssetAvailable(url);
-  const hasModel = style === 'model' && status === 'available';
-  const showGalaxy = style === 'galaxy';
+  // 'stars' is also the automatic fallback: a model that is missing or still
+  // resolving must never leave the scene empty.
+  const hasModel = style !== 'stars' && status === 'available';
 
   return (
     <group>
-      {/* The procedural layer always renders: it is both the zero-asset fallback
-          AND the particle/atmosphere pass layered over whatever sits behind it.
-
-          It carries FULL weight in galaxy mode, and that is the point. The
-          galaxy sits ~1200 units out so that it reads as a distant object
-          rather than as wallpaper, which leaves the rest of the sky to be
-          filled — and an empty sky around a small galaxy reads as a black
-          screen with a decal on it. Stars, drifting dust and nebulae are what
-          make that volume feel occupied, i.e. what makes it read as space.
-
-          The opaque horizon shell is the exception: it is a backstop for the
-          zero-asset case, and in front of a real environment it would simply
-          hide it. */}
-      <ProceduralSpace
-        rotationSpeed={rotationSpeed}
-        particleDensity={hasModel ? Math.round(particleDensity * 0.45) : particleDensity}
-        horizonShell={!hasModel && !showGalaxy}
-        nebulae={!hasModel}
-      />
-
-      {showGalaxy && (
-        <Galaxy count={galaxyStars} spinSpeed={galaxySpin} opacity={opacity} />
+      {/* A SUPPLIED MODEL IS SHOWN ALONE — NOTHING IS LAYERED OVER IT.
+          The procedural pass used to render underneath every mode, thinning
+          itself when a GLB was present. That is the wrong default for an
+          authored environment: the artist already lit and dressed it, and our
+          stars, drifting dust, sparkles and nebulae land IN FRONT of their work
+          and mix with their own lighting. So model mode renders the model and
+          nothing else, and the procedural layer is reserved for the modes that
+          are meant to be generated — the galaxy, where an empty sky around a
+          distant disc would read as a black screen with a decal on it, and the
+          zero-asset starfield fallback. */}
+      {!hasModel && (
+        <ProceduralSpace
+          rotationSpeed={rotationSpeed}
+          particleDensity={particleDensity}
+          horizonShell
+          nebulae
+        />
       )}
 
       {hasModel && (
@@ -299,9 +316,11 @@ export default function SpaceBackground({
             rotationSpeed={rotationSpeed}
             opacity={opacity}
             fitRadius={fitRadius}
+            offsetX={offsetX}
             offsetY={offsetY}
             offsetZ={offsetZ}
             tilt={tilt}
+            pointSize={spacePointSize}
           />
         </Suspense>
       )}

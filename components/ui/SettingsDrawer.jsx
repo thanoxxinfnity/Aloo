@@ -1240,7 +1240,9 @@ export default function SettingsDrawer({
                   label="Finger Curl"
                   value={settings.fingerCurl}
                   min={0}
-                  max={40}
+                  // Capped at 20: the curl compounds down each finger, so
+                  // anything above this closes the hand into a fist.
+                  max={20}
                   step={1}
                   onChange={(v) => set('fingerCurl', v)}
                   format={(v) => `${v}°`}
@@ -1382,41 +1384,17 @@ export default function SettingsDrawer({
             />
             <Field
               label="Backdrop"
-              hint="The galaxy is generated and rotates differentially — its core turns faster than its rim, the way a real one does. A loaded model can only spin rigidly."
+              hint="The environment model is shown on its own — its own lighting, nothing layered over it. The starfield is the fallback when no model is loaded."
             >
               <select
                 className="hud-select"
-                value={settings.backdrop ?? 'galaxy'}
+                value={settings.backdrop ?? 'model'}
                 onChange={(e) => set('backdrop', e.target.value)}
               >
-                <option value="galaxy">Spiral Galaxy (generated)</option>
-                <option value="model">Space Model (space.glb)</option>
-                <option value="stars">Starfield only</option>
+                <option value="model">Environment Model</option>
+                <option value="stars">Generated Starfield</option>
               </select>
             </Field>
-
-            {(settings.backdrop ?? 'galaxy') === 'galaxy' && (
-              <>
-                <Slider
-                  label="Galaxy Stars"
-                  value={settings.galaxyStars ?? 90000}
-                  min={15000}
-                  max={160000}
-                  step={5000}
-                  onChange={(v) => set('galaxyStars', v)}
-                  format={(v) => `${Math.round(v / 1000)}k`}
-                />
-                <Slider
-                  label="Galaxy Spin"
-                  value={settings.galaxySpin ?? 0.9}
-                  min={0}
-                  max={3}
-                  step={0.05}
-                  onChange={(v) => set('galaxySpin', v)}
-                  format={(v) => (v === 0 ? 'still' : `${v.toFixed(2)}`)}
-                />
-              </>
-            )}
 
             <Slider
               label="Ambient Rotation"
@@ -1447,6 +1425,15 @@ export default function SettingsDrawer({
                   step={5}
                   onChange={(v) => set('spaceFitRadius', v)}
                   format={(v) => `${v} m`}
+                />
+                <Slider
+                  label="Environment Sideways"
+                  value={settings.spaceOffsetX ?? 0}
+                  min={-300}
+                  max={300}
+                  step={5}
+                  onChange={(v) => set('spaceOffsetX', v)}
+                  format={(v) => `${v}`}
                 />
                 <Slider
                   label="Distance"
