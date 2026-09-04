@@ -276,40 +276,44 @@ export default function SpaceBackground({
   offsetZ = -190,
   tilt = 24,
   /**
-   * 'model' — the supplied environment GLB (default), shown on its own.
-   * 'stars' — the generated starfield, used when no model is available.
+   * 'stars' — the generated starfield (default).
+   * 'model' — the supplied environment GLB, shown on its own.
    */
-  style = 'model',
-  /** World-unit size for an environment authored as a point cloud. */
+  style = 'stars',
   spacePointSize = 1.6,
 }) {
   const status = useAssetAvailable(url);
-  // 'stars' is also the automatic fallback: a model that is missing or still
-  // resolving must never leave the scene empty.
-  const hasModel = style !== 'stars' && status === 'available';
+  const showModel = style === 'model' && status === 'available';
 
   return (
     <group>
-      {/* A SUPPLIED MODEL IS SHOWN ALONE — NOTHING IS LAYERED OVER IT.
-          The procedural pass used to render underneath every mode, thinning
-          itself when a GLB was present. That is the wrong default for an
-          authored environment: the artist already lit and dressed it, and our
-          stars, drifting dust, sparkles and nebulae land IN FRONT of their work
-          and mix with their own lighting. So model mode renders the model and
-          nothing else, and the procedural layer is reserved for the modes that
-          are meant to be generated — the galaxy, where an empty sky around a
-          distant disc would read as a black screen with a decal on it, and the
-          zero-asset starfield fallback. */}
-      {!hasModel && (
+      {/* THE DEFAULT BACKDROP IS THE GENERATED STARFIELD, and it is worth
+          recording why, because it looks like a step backwards and is not.
+
+          The original build rendered BOTH: this layer, thinned, with the
+          environment GLB behind it. But that GLB was never actually visible —
+          it is a point cloud, so it slipped past an `isMesh` guard, never had
+          its fog disabled, and at 190 units sat entirely beyond the fog's 90
+          unit far plane. It rendered every frame as solid fog colour.
+
+          So the backdrop everyone has actually been looking at all along is
+          this one — stars, drifting dust and motes, nothing else. It is
+          restored here as the honest default rather than as an accident, with
+          the same thinned density and no nebulae, which is exactly what it
+          looked like. The environment model is still selectable, and now that
+          the fog bug is fixed it genuinely shows when chosen. */}
+      {!showModel && (
         <ProceduralSpace
           rotationSpeed={rotationSpeed}
-          particleDensity={particleDensity}
-          horizonShell
-          nebulae
+          // 0.45: the density the original shipped with. At full strength the
+          // dust reads as snow rather than as distant space.
+          particleDensity={Math.round(particleDensity * 0.45)}
+          horizonShell={false}
+          nebulae={false}
         />
       )}
 
-      {hasModel && (
+      {showModel && (
         <Suspense fallback={null}>
           <SpaceModel
             url={url}

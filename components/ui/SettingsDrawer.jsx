@@ -1384,15 +1384,15 @@ export default function SettingsDrawer({
             />
             <Field
               label="Backdrop"
-              hint="The environment model is shown on its own — its own lighting, nothing layered over it. The starfield is the fallback when no model is loaded."
+              hint="The starfield is what the scene has always shown. Pick the model to use your own environment GLB instead — it renders on its own, with its own lighting."
             >
               <select
                 className="hud-select"
-                value={settings.backdrop ?? 'model'}
+                value={settings.backdrop ?? 'stars'}
                 onChange={(e) => set('backdrop', e.target.value)}
               >
-                <option value="model">Environment Model</option>
                 <option value="stars">Generated Starfield</option>
+                <option value="model">Environment Model</option>
               </select>
             </Field>
 
