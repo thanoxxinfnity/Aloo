@@ -260,6 +260,8 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
         right: hingeAxisFor(scene, findBone(scene, ['rightforearm', 'rforearm'])),
       },
       // Which mouth channel do we actually have? Decided once, not per frame.
+      // Eye bones exist AND actually deform the mesh — see collectInertBones.
+      eyeBonesUsable: report.eyeBonesUsable !== false,
       hasVisemes: report.visemeChecks.found.length >= 4,
       mouthMorphs: report.mouthFallback,
       // The validator already resolved each expression channel through its
@@ -419,6 +421,38 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
     onFocus?.(fit.focus);
   }, [fit, onFocus]);
 
+  /* ---- Tell the animation director which arm the viewer sees on the right ---
+     Bone NAMES cannot answer this. "LeftArm" means the character's left in some
+     exports and the viewer's left in others, and a gesture aimed at on-screen
+     UI (see pointAtSettings) sends her pointing off the wrong edge if the guess
+     is wrong. The rig itself knows: the camera looks down -Z, so the hand with
+     the greater world X is the one that renders on the right. */
+  useEffect(() => {
+    const l = rig.bones.leftHand || rig.bones.leftForeArm;
+    const r = rig.bones.rightHand || rig.bones.rightForeArm;
+    if (!l || !r) return;
+    scene.updateMatrixWorld(true);
+    const lp = new THREE.Vector3();
+    const rp = new THREE.Vector3();
+    l.getWorldPosition(lp);
+    r.getWorldPosition(rp);
+    director.screenRight = lp.x >= rp.x ? 'left' : 'right';
+  }, [rig, scene]);
+
+  /* ---- Wake-up ------------------------------------------------------------
+     She comes online instead of simply being there. Fired once, from a short
+     delay so it starts after the first frames have settled rather than during
+     the load stutter, when it would be half-missed. */
+  useEffect(() => {
+    if (director.introPlayed || settings.introAnimation === false) return undefined;
+    const id = setTimeout(() => {
+      director.introPlayed = true;
+      director.setEmotion('warm', 0.85);
+      director.trigger('wakeUp');
+    }, 500);
+    return () => clearTimeout(id);
+  }, [settings.introAnimation]);
+
   // Play an idle clip if the artist shipped one.
   useEffect(() => {
     if (!names?.length) return undefined;
@@ -514,8 +548,15 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
        Eye BONES let the gaze follow the pointer, which is most of what makes a
        face feel present. They cannot blink — blinking needs eyelids, i.e. a
        morph target — so we do not fake it; the diagnostics report it instead.
-       A slow saccade keeps the gaze from looking laser-locked. */
-    if (settings.eyeTracking !== false) {
+       A slow saccade keeps the gaze from looking laser-locked.
+
+       Skipped entirely when the rig's eye bones are INERT. Plenty of exports
+       (the bundled avatar among them) keep eye bones that no vertex is weighted
+       to: the names resolve, the code runs, and nothing on screen moves. Running
+       it anyway would burn work every frame to accomplish nothing, and — worse —
+       would hide the reason the eyes look dead. The validator reports it, and
+       the head-tracking layer below carries the gaze instead. */
+    if (settings.eyeTracking !== false && rig.eyeBonesUsable) {
       const sacX = Math.sin(t * 0.83) * 0.02 + Math.sin(t * 2.7) * 0.006;
       const sacY = Math.cos(t * 0.61) * 0.014;
       const eyeYaw = THREE.MathUtils.clamp(gazeX * 0.28, -0.35, 0.35) + sacX;
@@ -1071,7 +1112,20 @@ export default function AvatarCanvas({
         toneMapping: THREE.ACESFilmicToneMapping,
         toneMappingExposure: 1.05,
       }}
-      camera={{ position: [0, 1.46, 1.95], fov: 38, near: 0.1, far: 900 }}
+      /* FAR PLANE IS SET BY THE BACKDROP, NOT BY THE AVATAR.
+         The galaxy is placed ~820 units out (and further still on a narrow
+         phone, where it recedes to fit the width) because that distance is what
+         makes it read as a distant object rather than as wallpaper. A far plane
+         short of that clips it away ENTIRELY and silently: no error, no
+         artefact, just an empty sky — which is exactly what a `far: 900` did to
+         a galaxy that lands at ~1085 in portrait. 4000 leaves room for the
+         backdrop to be pushed further without this becoming a trap again.
+
+         Depth precision is unaffected in practice: the near plane sits at 0.2
+         (orbit never lets the camera closer than 0.7), and every backdrop layer
+         renders with depthWrite disabled, so the depth buffer only ever has to
+         separate the avatar from itself across a couple of metres. */
+      camera={{ position: [0, 1.46, 1.95], fov: 38, near: 0.2, far: 4000 }}
       style={{ opacity: settings.canvasOpacity ?? 1 }}
     >
       {/* Fog hides the far shell seam and adds atmospheric depth. */}
@@ -1089,6 +1143,9 @@ export default function AvatarCanvas({
         offsetY={settings.spaceOffsetY}
         offsetZ={settings.spaceOffsetZ}
         tilt={settings.spaceTilt}
+        style={settings.backdrop ?? 'galaxy'}
+        galaxyStars={settings.galaxyStars ?? 90000}
+        galaxySpin={settings.galaxySpin ?? 0.9}
       />
 
       <Suspense fallback={fallback}>

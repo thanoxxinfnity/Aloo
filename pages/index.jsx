@@ -52,6 +52,7 @@ import ChatWindow from '@/components/chat/ChatWindow';
 import DeepResearchPanel from '@/components/chat/DeepResearchPanel';
 import { VIEWPORT_MODES, VISION_CAPABLE, activeModel } from '@/lib/settingsStore';
 import { stopSpeaking } from '@/services/ttsLipSyncService';
+import { director } from '@/lib/animationDirector';
 
 /** WebGL is client-only — see the note above. */
 const AvatarCanvas = dynamic(() => import('@/components/3d/AvatarCanvas'), {
@@ -153,6 +154,31 @@ export default function AlooViewport() {
 
   const isMobile = useIsMobile();
   const library = useModelLibrary(settings, set);
+
+  /**
+   * With no key she cannot answer, so she SHOWS you where to fix it: every so
+   * often she looks up at the settings gear and points at it.
+   *
+   * Repeating on a timer rather than firing once is deliberate — the user who
+   * needs this hint is the one who just opened the app and is still looking
+   * around, and a single gesture in the first two seconds is missed by exactly
+   * that person. It stops the moment a key lands.
+   */
+  useEffect(() => {
+    if (hasActiveKey || settings.autoGestures === false) return undefined;
+    const point = () => {
+      // Never interrupt her mid-sentence with an unrelated instruction.
+      if (director.state === 'speaking') return;
+      director.setEmotion('warm', 0.7);
+      director.trigger('pointAtSettings');
+    };
+    const first = setTimeout(point, 4000);
+    const repeat = setInterval(point, 22000);
+    return () => {
+      clearTimeout(first);
+      clearInterval(repeat);
+    };
+  }, [hasActiveKey, settings.autoGestures]);
 
   // The canvas takes URLs, the library stores IDs. Resolve here so nothing
   // below this line has to know the library exists.

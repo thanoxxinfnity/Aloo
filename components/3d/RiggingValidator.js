@@ -238,9 +238,24 @@ export function validateModelRigging(gltf, meta = {}) {
 
   const normalizedBones = report.bones.map((b) => ({ raw: b, norm: normalizeName(b) }));
 
+  /* -- 1b. Which bones actually MOVE anything? ----------------------------
+     A bone can exist, be found by name, and deform nothing at all: exporters
+     routinely leave locator bones in the skeleton with no vertices weighted to
+     them. The bundled avatar is exactly this case — it has LeftEye/RightEye
+     bones, so every name-based check passes, yet 0 of its 20,294 vertices are
+     weighted to them. Eye tracking then runs every frame and moves nothing, and
+     from the outside the model simply "doesn't blink or look around" with no
+     explanation anywhere.
+
+     So we check the skin weights, not just the names, and report it. */
+  report.inertBones = collectInertBones(gltf);
+
   report.boneChecks = REQUIRED_BONES.map((req) => {
     const hit = normalizedBones.find((b) => matchesAlias(b.norm, req.aliases));
     const found = !!hit;
+    // Found by name but weighted to nothing: present, and useless.
+    const inert = found && report.inertBones.includes(hit.raw);
+
     if (!found) {
       const msg = `Bone "${req.label}" not found.`;
       if (req.critical) {
@@ -250,11 +265,23 @@ export function validateModelRigging(gltf, meta = {}) {
         report.warnings.push(msg);
         push('warn', msg);
       }
+    } else if (inert) {
+      const msg =
+        `Bone "${req.label}" (${hit.raw}) exists but no vertices are weighted to it — ` +
+        'rotating it will not move the mesh.';
+      report.warnings.push(msg);
+      push('warn', `Bone "${req.label}" → ${hit.raw} (inert: no skin weights)`);
     } else {
       push('ok', `Bone "${req.label}" → ${hit.raw}`);
     }
-    return { ...req, found, matchedName: hit?.raw || null };
+    return { ...req, found, inert, matchedName: hit?.raw || null };
   });
+
+  // The eye bones are the ones this matters for in practice: a rig whose eyes
+  // are inert AND which has no blink blendshape has no eye animation available
+  // at all, and the UI should say so rather than leaving the user guessing.
+  const eyeChecks = report.boneChecks.filter((b) => /eye/i.test(b.key || ''));
+  report.eyeBonesUsable = eyeChecks.length > 0 && eyeChecks.some((b) => b.found && !b.inert);
 
   /* -- 2. Morph targets / visemes ---------------------------------------- */
   const morphLookup = new Map(report.morphTargets.map((m) => [m.toLowerCase(), m]));
@@ -476,6 +503,58 @@ export function applyMorph(index, name, value) {
  * later one anywhere in the tree, rather than whichever bone happens to be
  * traversed first.
  */
+/**
+ * Bones that deform nothing — present in the skeleton, weighted to no vertex.
+ *
+ * Reads the skinIndex/skinWeight attributes directly. Every vertex references
+ * up to four joints; a joint that never appears with a non-trivial weight
+ * cannot move a single vertex, so rotating it is a no-op no matter how correct
+ * the code driving it is.
+ *
+ * The 1e-4 floor ignores the numerically-zero weights that exporters emit as
+ * padding in the unused slots of the four-wide attribute.
+ *
+ * @returns {string[]} bone names, sorted
+ */
+export function collectInertBones(gltf) {
+  const root = gltf?.scene || gltf;
+  if (!root?.traverse) return [];
+
+  const influential = new Set(); // Skeleton bone objects that move something
+  const allBones = new Set();
+
+  root.traverse((node) => {
+    if (node.isBone) allBones.add(node);
+    if (!node.isSkinnedMesh || !node.skeleton) return;
+
+    const bones = node.skeleton.bones || [];
+    bones.forEach((b) => allBones.add(b));
+
+    const idx = node.geometry?.attributes?.skinIndex;
+    const wgt = node.geometry?.attributes?.skinWeight;
+    if (!idx || !wgt) {
+      // No skinning data to judge by — assume every bone is doing its job
+      // rather than reporting a false positive.
+      bones.forEach((b) => influential.add(b));
+      return;
+    }
+
+    for (let v = 0; v < idx.count; v++) {
+      for (let c = 0; c < 4; c++) {
+        if (wgt.getComponent(v, c) > 1e-4) {
+          const bone = bones[idx.getComponent(v, c)];
+          if (bone) influential.add(bone);
+        }
+      }
+    }
+  });
+
+  return [...allBones]
+    .filter((b) => !influential.has(b))
+    .map((b) => b.name)
+    .sort();
+}
+
 export function findBone(scene, aliases) {
   const bones = [];
   scene.traverse((node) => {

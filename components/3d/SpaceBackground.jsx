@@ -21,6 +21,7 @@ import { Stars, Sparkles } from '@react-three/drei';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as THREE from 'three';
 import useAssetAvailable from '@/hooks/useAssetAvailable';
+import Galaxy from './Galaxy';
 
 /* -------------------------------------------------------------------------- */
 /* A) User-supplied space.glb                                                  */
@@ -250,22 +251,46 @@ export default function SpaceBackground({
   offsetY = 14,
   offsetZ = -190,
   tilt = 24,
+  /**
+   * 'galaxy' — the generated spiral galaxy (default). It is the only option
+   *            with DIFFERENTIAL rotation, so it is the only one that turns
+   *            like a real galaxy instead of a picture on a turntable.
+   * 'model'  — the supplied space.glb, rotated rigidly.
+   * 'stars'  — starfield and nebulae only.
+   */
+  style = 'galaxy',
+  galaxyStars = 90000,
+  galaxySpin = 0.9,
 }) {
   const status = useAssetAvailable(url);
-  const hasModel = status === 'available';
+  const hasModel = style === 'model' && status === 'available';
+  const showGalaxy = style === 'galaxy';
 
   return (
     <group>
       {/* The procedural layer always renders: it is both the zero-asset fallback
-          AND the particle/atmosphere pass layered on top of a supplied GLB.
-          Its opaque horizon shell is dropped when a real model is present,
-          since that shell would sit in front of the environment. */}
+          AND the particle/atmosphere pass layered over whatever sits behind it.
+
+          It carries FULL weight in galaxy mode, and that is the point. The
+          galaxy sits ~1200 units out so that it reads as a distant object
+          rather than as wallpaper, which leaves the rest of the sky to be
+          filled — and an empty sky around a small galaxy reads as a black
+          screen with a decal on it. Stars, drifting dust and nebulae are what
+          make that volume feel occupied, i.e. what makes it read as space.
+
+          The opaque horizon shell is the exception: it is a backstop for the
+          zero-asset case, and in front of a real environment it would simply
+          hide it. */}
       <ProceduralSpace
         rotationSpeed={rotationSpeed}
         particleDensity={hasModel ? Math.round(particleDensity * 0.45) : particleDensity}
-        horizonShell={!hasModel}
+        horizonShell={!hasModel && !showGalaxy}
         nebulae={!hasModel}
       />
+
+      {showGalaxy && (
+        <Galaxy count={galaxyStars} spinSpeed={galaxySpin} opacity={opacity} />
+      )}
 
       {hasModel && (
         <Suspense fallback={null}>

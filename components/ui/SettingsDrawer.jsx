@@ -1179,6 +1179,12 @@ export default function SettingsDrawer({
                 hint="Synthesises gestures from parametric archetypes — randomised amplitude, timing and side, so they never repeat."
               />
               <Toggle
+                label="Wake-Up Animation"
+                checked={settings.introAnimation !== false}
+                onChange={(v) => set('introAnimation', v)}
+                hint="She comes online when the app opens — head lifts, shoulders open, a small greeting — instead of appearing already standing still."
+              />
+              <Toggle
                 label="Facial Expression"
                 checked={settings.facialExpression}
                 onChange={(v) => set('facialExpression', v)}
@@ -1406,6 +1412,44 @@ export default function SettingsDrawer({
               onChange={(v) => set('maxZoom', v)}
               format={(v) => `${v.toFixed(1)} m`}
             />
+            <Field
+              label="Backdrop"
+              hint="The galaxy is generated and rotates differentially — its core turns faster than its rim, the way a real one does. A loaded model can only spin rigidly."
+            >
+              <select
+                className="hud-select"
+                value={settings.backdrop ?? 'galaxy'}
+                onChange={(e) => set('backdrop', e.target.value)}
+              >
+                <option value="galaxy">Spiral Galaxy (generated)</option>
+                <option value="model">Space Model (space.glb)</option>
+                <option value="stars">Starfield only</option>
+              </select>
+            </Field>
+
+            {(settings.backdrop ?? 'galaxy') === 'galaxy' && (
+              <>
+                <Slider
+                  label="Galaxy Stars"
+                  value={settings.galaxyStars ?? 90000}
+                  min={15000}
+                  max={160000}
+                  step={5000}
+                  onChange={(v) => set('galaxyStars', v)}
+                  format={(v) => `${Math.round(v / 1000)}k`}
+                />
+                <Slider
+                  label="Galaxy Spin"
+                  value={settings.galaxySpin ?? 0.9}
+                  min={0}
+                  max={3}
+                  step={0.05}
+                  onChange={(v) => set('galaxySpin', v)}
+                  format={(v) => (v === 0 ? 'still' : `${v.toFixed(2)}`)}
+                />
+              </>
+            )}
+
             <Slider
               label="Ambient Rotation"
               value={settings.ambientRotationSpeed}
