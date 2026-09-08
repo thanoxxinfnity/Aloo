@@ -39,7 +39,13 @@ import * as THREE from 'three';
 
 import SpaceBackground from './SpaceBackground';
 import CameraController from './CameraController';
-import { validateModelRigging, buildMorphIndex, applyMorph, findBone } from './RiggingValidator';
+import {
+  validateModelRigging,
+  buildMorphIndex,
+  applyMorph,
+  findBone,
+  BONE_ALIASES,
+} from './RiggingValidator';
 import { lipSync, VISEMES, startIdleAnimation, speak } from '@/services/ttsLipSyncService';
 import { director } from '@/lib/animationDirector';
 import {
@@ -112,7 +118,13 @@ function collectFingerBones(scene) {
   scene.traverse((n) => {
     if (!n.isBone) return;
     const norm = n.name.toLowerCase();
+    // English rigs: LeftHandIndex1. MMD rigs: 左人指１ — Japanese finger names
+    // with FULLWIDTH digits, which no ASCII pattern matches.
+    //   人指 index · 中指 middle · 薬指 ring · 小指 pinky
+    // Thumbs (親指 / "thumb") are excluded on both: they curl on a different
+    // axis and look wrong under a uniform curl.
     if (/(index|middle|ring|pinky)[0-9]/.test(norm)) out.push(n);
+    else if (/(人指|中指|薬指|小指)[０-９1-9]/.test(n.name)) out.push(n);
   });
   return out;
 }
@@ -231,32 +243,19 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
     return {
       report,
       morphIndex,
-      bones: {
-        head: findBone(scene, ['head']),
-        neck: findBone(scene, ['neck']),
-        spine: findBone(scene, ['spine', 'chest']),
-        jaw: findBone(scene, ['jaw']),
-        leftEye: findBone(scene, ['lefteye', 'eyel']),
-        rightEye: findBone(scene, ['righteye', 'eyer']),
-        leftArm: findBone(scene, ['leftarm', 'lupperarm', 'upperarml']),
-        rightArm: findBone(scene, ['rightarm', 'rupperarm', 'upperarmr']),
-        leftForeArm: findBone(scene, ['leftforearm', 'lforearm']),
-        rightForeArm: findBone(scene, ['rightforearm', 'rforearm']),
-        hips: findBone(scene, ['hips', 'pelvis']),
-        leftShoulder: findBone(scene, ['leftshoulder', 'lshoulder', 'shoulderl', 'leftclavicle']),
-        rightShoulder: findBone(scene, ['rightshoulder', 'rshoulder', 'shoulderr', 'rightclavicle']),
-        // Anchors for the palm stars. Matched before the finger bones because
-        // `findBone` is a fuzzy match and "LeftHandIndex1" would otherwise win.
-        leftHand: findBone(scene, ['lefthand', 'lhand', 'handl', 'hand_l', 'wristl']),
-        rightHand: findBone(scene, ['righthand', 'rhand', 'handr', 'hand_r', 'wristr']),
-      },
+      // One shared alias table (RiggingValidator.BONE_ALIASES) so the driver and
+      // the diagnostics can never disagree about what a rig provides. It covers
+      // MMD's Japanese names alongside the English ones.
+      bones: Object.fromEntries(
+        Object.entries(BONE_ALIASES).map(([key, aliases]) => [key, findBone(scene, aliases)])
+      ),
       // Finger joints, collected once. Flat splayed hands are one of the
       // strongest "this is a mannequin" cues; a relaxed curl fixes it for free.
       fingers: collectFingerBones(scene),
-      jawAxis: jawOpenAxis(scene, findBone(scene, ['jaw'])),
+      jawAxis: jawOpenAxis(scene, findBone(scene, BONE_ALIASES.jaw)),
       elbowAxis: {
-        left: hingeAxisFor(scene, findBone(scene, ['leftforearm', 'lforearm'])),
-        right: hingeAxisFor(scene, findBone(scene, ['rightforearm', 'rforearm'])),
+        left: hingeAxisFor(scene, findBone(scene, BONE_ALIASES.leftForeArm)),
+        right: hingeAxisFor(scene, findBone(scene, BONE_ALIASES.rightForeArm)),
       },
       // Which mouth channel do we actually have? Decided once, not per frame.
       // Eye bones exist AND actually deform the mesh — see collectInertBones.
@@ -364,19 +363,102 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
      angle sets an absolute value instead of accumulating. */
   const rest = useMemo(() => {
     const rad = THREE.MathUtils.degToRad(settings.aPoseAngle || 62);
-    const posed = settings.autoAPose && !gltf.animations?.length;
 
-    const armDown = (bone, sign) => {
+    /** Restore a bone to the rotation the artist shipped, so re-runs of this
+     *  memo cannot compound corrections on top of each other. */
+    const toBind = (bone) => {
       if (!bone) return;
-      if (bone.userData.__alooBindZ === undefined) {
-        bone.userData.__alooBindZ = bone.rotation.z;
-      }
-      bone.rotation.z = bone.userData.__alooBindZ + (posed ? sign * rad : 0);
+      if (!bone.userData.__alooBindQuat) bone.userData.__alooBindQuat = bone.quaternion.clone();
+      bone.quaternion.copy(bone.userData.__alooBindQuat);
     };
-    // Sign is per-rig: for this Mixamo-style bind orientation, negative Z on
-    // the left upper arm and positive on the right rotates them downward.
-    armDown(rig.bones.leftArm, -1);
-    armDown(rig.bones.rightArm, 1);
+
+    /** Angle, in radians, between a limb and straight down. */
+    const limbAngle = (bone) => {
+      if (!bone) return null;
+      const child = bone.children?.find((c) => c.isBone);
+      if (!child) return null;
+      scene.updateMatrixWorld(true);
+      const from = new THREE.Vector3();
+      const to = new THREE.Vector3();
+      bone.getWorldPosition(from);
+      child.getWorldPosition(to);
+      const dir = to.sub(from);
+      if (dir.lengthSq() < 1e-8) return null;
+      return Math.acos(THREE.MathUtils.clamp(dir.normalize().dot(new THREE.Vector3(0, -1, 0)), -1, 1));
+    };
+
+    /* DOES THIS RIG EVEN NEED CORRECTING?
+     *
+     * Every "relaxed pose" fix here — arms down, a bent elbow, curled fingers —
+     * exists for one specific case: a rig shipped in a raw T-pose, which is a
+     * modelling convention, not a pose anyone stands in. Applied to a rig that
+     * ALREADY ships a relaxed pose they do the opposite of their job. The MMD
+     * export is exactly that: its arms rest 51° from vertical and its fingers
+     * are already curled, and "correcting" it folded the arms across its chest.
+     *
+     * So measure the bind pose and decide. An upper arm within 25° of
+     * horizontal is a T-pose and gets the treatment; anything lower is a pose
+     * the artist chose, and is left alone.
+     */
+    toBind(rig.bones.leftArm);
+    toBind(rig.bones.rightArm);
+    const bindArm = limbAngle(rig.bones.leftArm) ?? limbAngle(rig.bones.rightArm);
+    const bindIsTPose = bindArm == null || bindArm > THREE.MathUtils.degToRad(65);
+
+    const posed = settings.autoAPose && !gltf.animations?.length && bindIsTPose;
+
+    /* SETTLE THE ARMS BY GEOMETRY, NOT BY A HARD-CODED AXIS AND SIGN.
+     *
+     * This used to be `rotation.z += ±angle`, which encodes one specific bind
+     * orientation — Mixamo's. Load a rig authored anywhere else and Z is not the
+     * swing axis and the signs are not those signs, so the "correction" twists
+     * the arms into the body or flings them upward. An MMD/PMX export is exactly
+     * such a rig, and there is no sign convention that satisfies both.
+     *
+     * So measure instead. The limb's direction comes from the bone and its child
+     * joint; the axis that swings it toward the floor is that direction crossed
+     * with world-down; and the amount to rotate is the difference between where
+     * the arm currently points and where we want it. That makes `aPoseAngle`
+     * mean the same thing on every model — degrees below horizontal — instead of
+     * "some rotation on some axis, hopefully the right one".
+     */
+    const armDown = (bone) => {
+      if (!bone || !posed) return;
+
+      scene.updateMatrixWorld(true);
+      const child = bone.children?.find((c) => c.isBone);
+      if (!child) return;
+
+      const from = new THREE.Vector3();
+      const to = new THREE.Vector3();
+      bone.getWorldPosition(from);
+      child.getWorldPosition(to);
+      const dir = to.sub(from);
+      if (dir.lengthSq() < 1e-8) return;
+      dir.normalize();
+
+      const down = new THREE.Vector3(0, -1, 0);
+      const current = Math.acos(THREE.MathUtils.clamp(dir.dot(down), -1, 1));
+      // `aPoseAngle` is degrees below horizontal, so 90° minus it is the angle
+      // the arm should make with straight down. 74° below horizontal = a
+      // relaxed 16° from vertical.
+      const target = Math.PI / 2 - rad;
+      const delta = current - target;
+      if (Math.abs(delta) < 1e-3) return;
+
+      // Rotating about (dir × down) by `current` would lay the limb exactly
+      // along down; rotating by `delta` stops it at the target instead.
+      const axis = new THREE.Vector3().crossVectors(dir, down);
+      if (axis.lengthSq() < 1e-8) return; // already vertical, nothing to swing
+      axis.normalize();
+
+      const worldQ = new THREE.Quaternion();
+      bone.getWorldQuaternion(worldQ);
+      const localAxis = axis.applyQuaternion(worldQ.invert()).normalize();
+      bone.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(localAxis, delta));
+    };
+    armDown(rig.bones.leftArm);
+    armDown(rig.bones.rightArm);
 
     const snap = {};
     Object.entries(rig.bones).forEach(([k, bone]) => {
@@ -393,7 +475,8 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
     // RELAXED HANDS. A bind pose leaves fingers dead straight, which reads as a
     // shop dummy. A gentle curl, stronger toward the fingertips, is what a hand
     // does at rest. Applied once here so it becomes part of the rest pose.
-    const curl = THREE.MathUtils.degToRad(settings.fingerCurl ?? 12);
+    // Same rule as the arms: a rig that ships a pose has posed hands already.
+    const curl = posed ? THREE.MathUtils.degToRad(settings.fingerCurl ?? 3) : 0;
     if (curl > 0) {
       rig.fingers.forEach((bone) => {
         if (bone.userData.__alooBindX === undefined) {
@@ -408,8 +491,11 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
     snap.fingers = rig.fingers.map((b) => b.rotation.clone());
     if (rig.bones.hips) snap.hips = rig.bones.hips.rotation.clone();
     if (rig.bones.hips) snap.hipsPos = rig.bones.hips.position.clone();
+    // Carried through so the per-frame layer can skip the cosmetic elbow bend
+    // on a rig whose bind pose is already relaxed.
+    snap.bindIsTPose = bindIsTPose;
     return snap;
-  }, [rig, gltf.animations, settings.autoAPose, settings.aPoseAngle, settings.fingerCurl]);
+  }, [rig, scene, gltf.animations, settings.autoAPose, settings.aPoseAngle, settings.fingerCurl]);
 
   useEffect(() => {
     onReport?.(rig.report);
@@ -681,17 +767,31 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
        `dp.*ForeArm.y` from the director is read as a flex AMOUNT, positive for
        the left arm and negative for the right (matching how the gestures are
        written); both are converted to the same physical bend here. */
-    const bend = THREE.MathUtils.degToRad(settings.elbowBend ?? 11);
+    /* The resting bend is a T-pose fix, not a style: a rig that ships its own
+       relaxed pose already has the elbows the artist wanted, and adding to them
+       folds the forearms across the chest. Gestures still drive the elbow on
+       every rig — only the constant offset is dropped. */
+    const bend = rest.bindIsTPose ? THREE.MathUtils.degToRad(settings.elbowBend ?? 11) : 0;
+
+    /* HOW FAR THE ELBOW MAY TRAVEL DEPENDS ON THE RIG.
+       The ±74° range is tuned for a T-pose rig, where the forearm starts dead
+       straight and needs the whole span to reach a raised hand. A rig that
+       ships its own pose starts part-way through that range already, so the
+       same numbers swing the forearm out past the silhouette — on the MMD
+       export, with its wide flared sleeves, that reads as arms flung
+       horizontally. Gestures stay expressive, just within the pose. */
+    const flexLimit = rest.bindIsTPose ? 1.3 : 0.45;
+    const holdFlex = (v) => THREE.MathUtils.clamp(v, -flexLimit, flexLimit);
     if (wave === 0 && rig.bones.leftForeArm && rest.leftForeArmQuat && rig.elbowAxis.left) {
       const flex = bend + gesture * 0.7 * Math.sin(t * 2.3) + dp.leftForeArm.y;
-      elbowFlex.left = THREE.MathUtils.lerp(elbowFlex.left, flex, delta * 6);
+      elbowFlex.left = holdFlex(THREE.MathUtils.lerp(elbowFlex.left, flex, delta * 6));
       // Positive about the geometric hinge flexes the joint forward.
       tmpQuat.setFromAxisAngle(rig.elbowAxis.left, elbowFlex.left);
       rig.bones.leftForeArm.quaternion.copy(rest.leftForeArmQuat).multiply(tmpQuat);
     }
     if (wave === 0 && rig.bones.rightForeArm && rest.rightForeArmQuat && rig.elbowAxis.right) {
       const flex = bend + gesture * 0.7 * Math.sin(t * 2.3 + 0.6) - dp.rightForeArm.y;
-      elbowFlex.right = THREE.MathUtils.lerp(elbowFlex.right, flex, delta * 6);
+      elbowFlex.right = holdFlex(THREE.MathUtils.lerp(elbowFlex.right, flex, delta * 6));
       tmpQuat.setFromAxisAngle(rig.elbowAxis.right, elbowFlex.right);
       rig.bones.rightForeArm.quaternion.copy(rest.rightForeArmQuat).multiply(tmpQuat);
     }

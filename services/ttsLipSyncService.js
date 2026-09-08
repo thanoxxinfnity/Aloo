@@ -477,7 +477,7 @@ async function speakNative(text, s) {
   try {
     await plugin.speak({
       text,
-      lang: s.sttLanguage || 'en-US',
+      lang: s.ttsLanguage || s.sttLanguage || 'en-US',
       // The plugin's rate is a plain multiplier, same as the Web Speech API's.
       rate: s.ttsRate ?? 1,
       pitch: s.ttsPitch ?? 1,
@@ -571,12 +571,26 @@ function speakBrowser(text, s) {
     utter.rate = s.ttsRate ?? 1;
     utter.pitch = s.ttsPitch ?? 1;
     utter.volume = s.ttsVolume ?? 1;
-    utter.lang = s.sttLanguage || 'en-US';
+    // Speaking locale, not the listening one — see settings.ttsLanguage.
+    utter.lang = s.ttsLanguage || s.sttLanguage || 'en-US';
 
     const voices = window.speechSynthesis.getVoices();
     if (s.ttsVoiceURI) {
       const v = voices.find((x) => x.voiceURI === s.ttsVoiceURI);
       if (v) utter.voice = v;
+    } else {
+      /* SETTING `lang` ALONE IS NOT ENOUGH IN A BROWSER.
+         Chrome honours `utter.lang` only when it has no voice to fall back on;
+         with a default voice installed it speaks US English regardless, and the
+         requested accent silently does not happen. Picking the voice ourselves
+         is what actually makes en-IN sound Indian. Exact locale first, then the
+         same base language, then leave it to the engine. */
+      const want = (utter.lang || '').toLowerCase();
+      const base = want.split('-')[0];
+      const match =
+        voices.find((v) => v.lang?.toLowerCase().replace('_', '-') === want) ||
+        voices.find((v) => v.lang?.toLowerCase().startsWith(`${base}-`));
+      if (match) utter.voice = match;
     }
 
     // Build the predicted mouth track, scaled by the requested speech rate.

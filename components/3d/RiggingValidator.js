@@ -25,17 +25,78 @@
 /* -------------------------------------------------------------------------- */
 
 /** Bones ALOO's procedural animation actually drives. */
+/**
+ * BONE ALIASES, INCLUDING MMD.
+ *
+ * Every entry ends with its Japanese equivalents. MMD/PMX is the second most
+ * common source of anime avatars and it names bones exclusively in Japanese —
+ * 頭 for head, 左腕 for the left upper arm, 左ひじ for the elbow. A rig like that
+ * is fully capable; it just cannot be found by English names.
+ *
+ * MMD side conventions worth knowing while reading these: 左 = left, 右 = right,
+ * 腕 = upper arm, ひじ = elbow, 手首 = wrist, 肩 = shoulder, 上半身 = upper body,
+ * 下半身 = lower body, 首 = neck, 目 = eye.
+ *
+ * Aliases are tried in order across the WHOLE skeleton (see findBone), so the
+ * English names still win on rigs that have both.
+ */
 export const REQUIRED_BONES = [
-  { key: 'head', label: 'Head', aliases: ['head'], critical: true },
-  { key: 'neck', label: 'Neck', aliases: ['neck'], critical: true },
-  { key: 'spine', label: 'Spine', aliases: ['spine', 'chest', 'torso'], critical: true },
-  { key: 'hips', label: 'Hips / Root', aliases: ['hips', 'pelvis', 'root', 'armature'], critical: false },
-  { key: 'leftarm', label: 'Left Arm', aliases: ['leftarm', 'larm', 'upperarml', 'armleft', 'lupperarm', 'shoulderl'], critical: false },
-  { key: 'rightarm', label: 'Right Arm', aliases: ['rightarm', 'rarm', 'upperarmr', 'armright', 'rupperarm', 'shoulderr'], critical: false },
-  { key: 'jaw', label: 'Jaw', aliases: ['jaw'], critical: false },
-  { key: 'lefteye', label: 'Left Eye', aliases: ['lefteye', 'eyel', 'eyeleft'], critical: false },
-  { key: 'righteye', label: 'Right Eye', aliases: ['righteye', 'eyer', 'eyeright'], critical: false },
+  { key: 'head', label: 'Head', aliases: ['head', '頭'], critical: true },
+  { key: 'neck', label: 'Neck', aliases: ['neck', '首'], critical: true },
+  {
+    key: 'spine',
+    label: 'Spine',
+    aliases: ['spine', 'chest', 'torso', '上半身2', '上半身'],
+    critical: true,
+  },
+  {
+    key: 'hips',
+    label: 'Hips / Root',
+    aliases: ['hips', 'pelvis', 'root', 'armature', '下半身', 'センター'],
+    critical: false,
+  },
+  {
+    key: 'leftarm',
+    label: 'Left Arm',
+    aliases: ['leftarm', 'larm', 'upperarml', 'armleft', 'lupperarm', 'shoulderl', '左腕'],
+    critical: false,
+  },
+  {
+    key: 'rightarm',
+    label: 'Right Arm',
+    aliases: ['rightarm', 'rarm', 'upperarmr', 'armright', 'rupperarm', 'shoulderr', '右腕'],
+    critical: false,
+  },
+  { key: 'jaw', label: 'Jaw', aliases: ['jaw', '顎', 'あご'], critical: false },
+  { key: 'lefteye', label: 'Left Eye', aliases: ['lefteye', 'eyel', 'eyeleft', '左目'], critical: false },
+  { key: 'righteye', label: 'Right Eye', aliases: ['righteye', 'eyer', 'eyeright', '右目'], critical: false },
 ];
+
+/**
+ * The bone map the animation layer drives, in one place so AvatarCanvas and the
+ * validator cannot drift apart. Same ordering rule: English first, Japanese
+ * last, most specific alias before the more general one.
+ */
+export const BONE_ALIASES = {
+  head: ['head', '頭'],
+  neck: ['neck', '首'],
+  // 上半身2 is MMD's chest; prefer it over 上半身 (the lower torso segment),
+  // because animating the chest reads as breathing and animating the waist
+  // reads as a bow.
+  spine: ['spine', 'chest', '上半身2', '上半身'],
+  jaw: ['jaw', '顎', 'あご'],
+  leftEye: ['lefteye', 'eyel', '左目'],
+  rightEye: ['righteye', 'eyer', '右目'],
+  leftArm: ['leftarm', 'lupperarm', 'upperarml', '左腕'],
+  rightArm: ['rightarm', 'rupperarm', 'upperarmr', '右腕'],
+  leftForeArm: ['leftforearm', 'lforearm', '左ひじ', '左肘'],
+  rightForeArm: ['rightforearm', 'rforearm', '右ひじ', '右肘'],
+  hips: ['hips', 'pelvis', '下半身', 'センター'],
+  leftShoulder: ['leftshoulder', 'lshoulder', 'shoulderl', 'leftclavicle', '左肩'],
+  rightShoulder: ['rightshoulder', 'rshoulder', 'shoulderr', 'rightclavicle', '右肩'],
+  leftHand: ['lefthand', 'lhand', 'handl', 'hand_l', 'wristl', '左手首'],
+  rightHand: ['righthand', 'rhand', 'handr', 'hand_r', 'wristr', '右手首'],
+};
 
 /** Oculus/ReadyPlayerMe viseme morphs used by the lip-sync driver. */
 export const REQUIRED_VISEMES = [
@@ -113,12 +174,27 @@ export function resolveAliases(morphLookup, aliases) {
 /* -------------------------------------------------------------------------- */
 
 /** Lowercase, drop rig prefixes and every separator, so names become comparable. */
+/**
+ * KEEP NON-ASCII. The old `[^a-z0-9]` strip deleted entire alphabets.
+ *
+ * An MMD/PMX model — the most common source of anime avatars after VRoid —
+ * names every one of its bones in Japanese: 頭, 首, 上半身, 左腕. Stripping to
+ * `[a-z0-9]` turned all 471 of them into the SAME empty string, so no bone
+ * resolved, the whole rig read as unriggable, and the character stood frozen
+ * with no error to explain it.
+ *
+ * CJK ranges are kept alongside latin: hiragana/katakana (3040-30FF), CJK
+ * ideographs (4E00-9FFF), and the fullwidth forms MMD uses for digits and for
+ * the katakana in bone names like 左足ＩＫ (FF00-FFEF).
+ */
+const KEEP = /[^a-z0-9぀-ヿ一-鿿＀-￯]/g;
+
 export function normalizeName(name) {
   return String(name || '')
     .toLowerCase()
     .replace(/^mixamorig[:_]?/, '')
     .replace(/^(def|org|mch|ctrl|j_bip_[a-z]_?|bip01_?|bone_)/, '')
-    .replace(/[^a-z0-9]/g, '');
+    .replace(KEEP, '');
 }
 
 /** Does a normalised bone name contain any of the aliases? */
@@ -446,7 +522,14 @@ export function logReport(report) {
     }))
   );
   if (report.morphTargets.length) console.log('Morph targets:', report.morphTargets);
-  report.errors.forEach((e) => console.error('✘', e));
+  /* Logged as warnings, not errors, however severe the FINDING is.
+     Everything here describes the loaded model's capabilities — "this rig has
+     no jaw" is a fact about someone's asset, not a fault in the app. Raising it
+     to console.error puts it in the same bucket as a real crash, which trains
+     anyone reading the console (and any automated check watching it) to ignore
+     that bucket. The severity is preserved where it belongs: `report.errors`
+     still drives the red rows in the diagnostics panel. */
+  report.errors.forEach((e) => console.warn('✘', e));
   report.warnings.forEach((w) => console.warn('▲', w));
   console.groupEnd();
   /* eslint-enable no-console */

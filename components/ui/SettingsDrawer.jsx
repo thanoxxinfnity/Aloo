@@ -879,11 +879,28 @@ export default function SettingsDrawer({
               hint="Re-opens the mic automatically after each reply."
             />
 
-            <Field label="Recognition Language">
+            <Field label="Recognition Language" hint="The language the microphone listens for.">
               <select
                 className="hud-select"
                 value={settings.sttLanguage}
                 onChange={(e) => set('sttLanguage', e.target.value)}
+              >
+                {STT_LANGUAGES.map((l) => (
+                  <option key={l.code} value={l.code}>
+                    {l.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+
+            <Field
+              label="Voice Language / Accent"
+              hint="The accent she speaks with — the engine picks its voice from this. English (India) gives an Indian accent, and on Android it works offline."
+            >
+              <select
+                className="hud-select"
+                value={settings.ttsLanguage ?? 'en-IN'}
+                onChange={(e) => set('ttsLanguage', e.target.value)}
               >
                 {STT_LANGUAGES.map((l) => (
                   <option key={l.code} value={l.code}>
@@ -1027,7 +1044,14 @@ export default function SettingsDrawer({
               kind="avatar"
               entries={library?.avatars || []}
               selectedId={settings.avatarModelId}
-              onSelect={(id) => set('avatarModelId', id)}
+              /* `__avatarChosen` records that a HUMAN picked this, which stops
+                 the default-avatar migration from overriding the choice on the
+                 next load — otherwise the previous bundled model could never be
+                 selected, it would simply flip back every launch. */
+              onSelect={(id) => {
+                set('avatarModelId', id);
+                set('__avatarChosen', true);
+              }}
               onRemove={(id) => library?.remove(id)}
             />
             <AddModelRow kind="avatar" onUpload={library?.upload} onAddUrl={library?.addUrl} />
