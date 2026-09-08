@@ -48,6 +48,7 @@ import {
 } from './RiggingValidator';
 import { lipSync, VISEMES, startIdleAnimation, speak } from '@/services/ttsLipSyncService';
 import { director } from '@/lib/animationDirector';
+import { resolveQuality } from '@/lib/quality';
 import {
   mood,
   startIdleAttention,
@@ -201,7 +202,7 @@ function hingeAxisFor(scene, bone) {
   return axis.applyQuaternion(worldQ.invert()).normalize();
 }
 
-function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
+function AvatarModel({ url, scale, offset, settings, shadowsOn, onReport, onFocus }) {
   const gltf = useLoader(GLTFLoader, url, configureLoader);
   const group = useRef();
   const { pointer } = useThree();
@@ -222,13 +223,16 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
     const clone = cloneSkinned(gltf.scene);
     clone.traverse((n) => {
       if (n.isMesh || n.isSkinnedMesh) {
-        n.castShadow = true;
-        n.receiveShadow = true;
+        // Follows the quality profile: with the shadow map off these flags do
+        // nothing but still cost a per-object check each frame, and on the low
+        // tier the map is off entirely.
+        n.castShadow = shadowsOn;
+        n.receiveShadow = shadowsOn;
         n.frustumCulled = false; // skinned bounds are unreliable; avoid pop-out
       }
     });
     return clone;
-  }, [gltf]);
+  }, [gltf, shadowsOn]);
 
   const { actions, names } = useAnimations(gltf.animations, group);
 
@@ -491,6 +495,29 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
     snap.fingers = rig.fingers.map((b) => b.rotation.clone());
     if (rig.bones.hips) snap.hips = rig.bones.hips.rotation.clone();
     if (rig.bones.hips) snap.hipsPos = rig.bones.hips.position.clone();
+    /* WHICH WAY IS "DOWN" FOR THIS RIG'S ARMS?
+     *
+     * The gesture layer writes plain Euler offsets, and whether +Z lowers an
+     * arm or raises it is a property of the exporter, not of anatomy. Assuming
+     * one convention is what made the same code both throttle motion and let
+     * the arms creep toward a T-pose on an MMD rig — it was guarding the wrong
+     * direction.
+     *
+     * So probe it: nudge the bone and see whether the limb moved closer to
+     * vertical. Done once here, it costs nothing per frame and it is exact. */
+    const downSign = (bone) => {
+      if (!bone) return -1;
+      const before = limbAngle(bone);
+      if (before == null) return -1;
+      const saved = bone.rotation.z;
+      bone.rotation.z = saved + 0.15;
+      const after = limbAngle(bone);
+      bone.rotation.z = saved;
+      if (after == null) return -1;
+      return after < before ? 1 : -1;
+    };
+    snap.armDownSign = { left: downSign(rig.bones.leftArm), right: downSign(rig.bones.rightArm) };
+
     // Carried through so the per-frame layer can skip the cosmetic elbow bend
     // on a rig whose bind pose is already relaxed.
     snap.bindIsTPose = bindIsTPose;
@@ -734,10 +761,29 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
     /* ---- 4b. Arms: idle sway, and gesture while speaking -------------------- */
     const armSwing = Math.sin(t * 0.72) * 0.03;
     const gesture = f.speaking ? f.energy * 0.16 : 0;
+
+    /* Let the arms swing IN freely and OUT barely.
+       Outward is the direction that walks an arm back toward the bind pose, and
+       for a humanoid that pose is a T. Adduction is safe — an arm crossing the
+       body never looks broken — so it keeps the full range while abduction gets
+       an eighth of it. `armDownSign` is measured per rig above, which is what
+       makes this correct on an MMD export as well as a Mixamo one. */
+    const ABDUCT_MAX = 0.0375; // ~2°, against a full 0.3 rad (~17°) inward
+    const holdArm = (offset, downSign) => {
+      // Same sign as "down" means the offset lowers the arm — always allowed.
+      if (offset * downSign >= 0) return offset;
+      // Otherwise it lifts the arm outward; keep only a token amount.
+      return -downSign * Math.min(Math.abs(offset), ABDUCT_MAX);
+    };
+
     if (rig.bones.leftArm && rest.leftArm) {
+      const leftOff = holdArm(
+        armSwing + gesture * Math.sin(t * 3.1) + dp.leftArm.z,
+        rest.armDownSign?.left ?? -1
+      );
       rig.bones.leftArm.rotation.z = THREE.MathUtils.lerp(
         rig.bones.leftArm.rotation.z,
-        rest.leftArm.z + armSwing + gesture * Math.sin(t * 3.1) + dp.leftArm.z,
+        rest.leftArm.z + leftOff,
         delta * 2.4
       );
       rig.bones.leftArm.rotation.x = THREE.MathUtils.lerp(
@@ -747,9 +793,13 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
       );
     }
     if (rig.bones.rightArm && rest.rightArm && wave === 0) {
+      const rightOff = holdArm(
+        -armSwing - gesture * Math.sin(t * 3.1 + 0.9) + dp.rightArm.z,
+        rest.armDownSign?.right ?? 1
+      );
       rig.bones.rightArm.rotation.z = THREE.MathUtils.lerp(
         rig.bones.rightArm.rotation.z,
-        rest.rightArm.z - armSwing - gesture * Math.sin(t * 3.1 + 0.9) + dp.rightArm.z,
+        rest.rightArm.z + rightOff,
         delta * 2.4
       );
       rig.bones.rightArm.rotation.x = THREE.MathUtils.lerp(
@@ -814,9 +864,21 @@ function AvatarModel({ url, scale, offset, settings, onReport, onFocus }) {
     if (wave > 0 && rig.bones.rightArm && rest.rightArm) {
       // Rise over the first 25%, hold, fall over the last 30%.
       const env = Math.min(1, wave / 0.25) * Math.min(1, (1 - wave) / 0.3);
+
+      /* THE WAVE HAS TO RESPECT THE RIG TOO.
+         This hard-coded `-1.35` on the shoulder — 77° in one assumed direction
+         — is why touching the screen threw the character into a broken pose on
+         an MMD rig: on that convention it yanked the whole arm the wrong way.
+         The lift is now signed by the measured `armDownSign` (negated, because
+         raising is the opposite of lowering) and scaled to what the rig can
+         take, exactly like the gesture layer. Most of a wave is forearm anyway,
+         and the forearm rides the derived hinge axis, which is already correct
+         on any rig. */
+      const lift = rest.bindIsTPose ? 1.35 : 0.5;
+      const upSign = -(rest.armDownSign?.right ?? 1);
       rig.bones.rightArm.rotation.z = THREE.MathUtils.lerp(
         rig.bones.rightArm.rotation.z,
-        rest.rightArm.z - 1.35 * env,
+        rest.rightArm.z + upSign * lift * env,
         delta * 9
       );
       rig.bones.rightArm.rotation.x = THREE.MathUtils.lerp(
@@ -1188,14 +1250,18 @@ export default function AvatarCanvas({
 
   const useGlb = modelStatus === 'available' && !loadFailed;
   const fallback = <HoloAvatar scale={scale} offset={offset} settings={settings} />;
+  /* One resolved cost profile for the whole scene — see lib/quality.js for what
+     each knob actually buys. Memoised because changing `dpr` or `antialias`
+     forces r3f to rebuild the WebGL context. */
+  const quality = useMemo(() => resolveQuality(settings.quality), [settings.quality]);
 
   return (
     <Canvas
       className={className}
-      shadows
-      dpr={[1, 2]} // cap at 2x — 3x retina rendering costs 2.25x fill for nothing
+      shadows={quality.shadows}
+      dpr={quality.dpr}
       gl={{
-        antialias: true,
+        antialias: quality.antialias,
         alpha: true,
         powerPreference: 'high-performance',
         toneMapping: THREE.ACESFilmicToneMapping,
@@ -1225,7 +1291,9 @@ export default function AvatarCanvas({
       <SpaceBackground
         url={settings.spaceModelUrl}
         rotationSpeed={settings.ambientRotationSpeed}
-        particleDensity={settings.particleDensity}
+        // Background sprites are pure atmosphere and the first thing worth
+        // thinning when frames are scarce.
+        particleDensity={Math.round(settings.particleDensity * quality.particleScale)}
         fitRadius={settings.spaceFitRadius}
         offsetX={settings.spaceOffsetX ?? 0}
         offsetY={settings.spaceOffsetY}
@@ -1242,6 +1310,7 @@ export default function AvatarCanvas({
               url={settings.avatarModelUrl}
               scale={scale}
               offset={offset}
+              shadowsOn={quality.shadows}
               settings={settings}
               onReport={onRiggingReport}
               onFocus={setFocus}
@@ -1252,7 +1321,10 @@ export default function AvatarCanvas({
         )}
       </Suspense>
 
-      {/* Grounding shadow — without it the avatar floats in an unreadable void. */}
+      {/* Grounding shadow — without it the avatar floats in an unreadable void.
+          It also re-renders the entire scene into an offscreen target every
+          frame, which is why the low tier drops it first. */}
+      {quality.contactShadows && (
       <ContactShadows
         position={[0, offset[1] + 0.001, 0]}
         opacity={0.55}
@@ -1261,6 +1333,7 @@ export default function AvatarCanvas({
         far={4}
         color="#0ea5e9"
       />
+      )}
 
       <CameraController
         focus={focus}

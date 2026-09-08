@@ -225,7 +225,7 @@ function DustField({ count, rotationSpeed }) {
   );
 }
 
-function ProceduralSpace({ rotationSpeed, particleDensity, horizonShell = true, nebulae = true }) {
+function ProceduralSpace({ rotationSpeed, particleDensity, horizonShell = true, nebulae = true, sparkles = true }) {
   const group = useRef();
 
   useFrame((_, delta) => {
@@ -240,8 +240,12 @@ function ProceduralSpace({ rotationSpeed, particleDensity, horizonShell = true, 
 
       <DustField count={particleDensity} rotationSpeed={rotationSpeed} />
 
-      {/* Glowing motes near the avatar — foreground depth cue. */}
-      <Sparkles count={90} scale={[14, 8, 14]} size={2.6} speed={0.32} opacity={0.5} color="#38bdf8" />
+      {/* Glowing motes near the avatar — foreground depth cue. These sit IN
+          FRONT of her, so they are both a cost and the thing most likely to
+          obscure the character; dropped first on the low tier. */}
+      {sparkles && (
+        <Sparkles count={90} scale={[14, 8, 14]} size={2.6} speed={0.32} opacity={0.5} color="#38bdf8" />
+      )}
 
       {nebulae && (
         <>
@@ -281,6 +285,7 @@ export default function SpaceBackground({
    */
   style = 'stars',
   spacePointSize = 1.6,
+  sparkles = true,
 }) {
   const status = useAssetAvailable(url);
   const showModel = style === 'model' && status === 'available';

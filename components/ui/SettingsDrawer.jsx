@@ -1407,6 +1407,22 @@ export default function SettingsDrawer({
               format={(v) => `${v.toFixed(1)} m`}
             />
             <Field
+              label="Render Quality"
+              hint="Auto reads the device. Low turns off the grounding shadow (which re-renders the whole scene each frame), drops the pixel ratio and thins the starfield — that is most of the frame budget on a 4GB phone."
+            >
+              <select
+                className="hud-select"
+                value={settings.quality ?? 'auto'}
+                onChange={(e) => set('quality', e.target.value)}
+              >
+                <option value="auto">Auto (detect device)</option>
+                <option value="high">High</option>
+                <option value="balanced">Balanced</option>
+                <option value="low">Low — 4GB phones</option>
+              </select>
+            </Field>
+
+            <Field
               label="Backdrop"
               hint="The starfield is what the scene has always shown. Pick the model to use your own environment GLB instead — it renders on its own, with its own lighting."
             >
@@ -1515,7 +1531,10 @@ export default function SettingsDrawer({
               <Toggle
                 label="CRT Scanlines"
                 checked={settings.hudScanlines}
-                onChange={(v) => set('hudScanlines', v)}
+                onChange={(v) => {
+                  set('hudScanlines', v);
+                  set('__hudChosen', true);
+                }}
               />
               <Toggle
                 label="Telemetry Read-outs"
