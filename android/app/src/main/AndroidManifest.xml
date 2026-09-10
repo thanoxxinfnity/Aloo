@@ -49,6 +49,20 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- TV control over the local network (TvNetPlugin).
+
+         ACCESS_WIFI_STATE + CHANGE_WIFI_MULTICAST_STATE are what let the app
+         hold a multicast lock while searching for the TV. Android powers
+         multicast down on the Wi-Fi chip to save battery, so without the lock
+         the SSDP search goes out and no reply ever arrives — the search simply
+         finds nothing, with no error to explain why.
+
+         Both are install-time permissions: nothing is prompted for, and neither
+         grants access to location or to any network beyond the one the phone is
+         already on. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
     <!-- Live camera feed (vision pipeline). Capacitor's WebChromeClient maps the
          WebView's getUserMedia PermissionRequest onto these runtime grants. -->
     <uses-permission android:name="android.permission.CAMERA" />

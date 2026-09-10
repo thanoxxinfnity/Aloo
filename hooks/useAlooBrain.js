@@ -19,6 +19,7 @@ import {
 import { PROVIDERS, activeModel } from '@/lib/settingsStore';
 import { director } from '@/lib/animationDirector';
 import {
+  TV_COMMANDS,
   parseTvCommand,
   describeTvCommand,
   parseDeviceCommand,
@@ -135,20 +136,43 @@ export default function useAlooBrain() {
         { id: replyId, role: 'assistant', content: '', at: Date.now(), pending: true, tv: true },
       ]);
 
+      // Two commands take real time — waking a TV means waiting for it to boot,
+      // and playing something by name means a search first. Saying so beats a
+      // silent pause that reads as a hang.
+      const slow =
+        tv.command === TV_COMMANDS.POWER_ON ? 'TV ko jaga raha hoon, ek minute…'
+        : tv.command === TV_COMMANDS.PLAY_VIDEO ? `"${tv.args.query}" dhoond raha hoon…`
+        : null;
+      if (slow) {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === replyId ? { ...m, content: slow } : m))
+        );
+      }
+
       let reply;
       let failed = false;
       try {
-        await runTvCommand(tv.command, tv.args);
-        reply = describeTvCommand(tv.command, tv.args);
+        const result = await runTvCommand(tv.command, tv.args);
+        // playOnTv hands back what it actually found, so the confirmation can
+        // name the video rather than claiming a generic success.
+        reply = describeTvCommand(tv.command, { ...tv.args, title: result?.title });
         director.setEmotion('confident', 0.8);
       } catch (err) {
         failed = true;
         // The service already phrases its errors for a person ("accept the
         // prompt on your TV"), so pass them through rather than wrapping them
         // in something vaguer.
-        reply = `TV se baat nahi ho payi — ${err.message}`;
-        director.setEmotion('concerned', 0.85);
-        setError(err.message);
+        if (err.openedApp) {
+          // A search that found nothing still opened the app — reporting a flat
+          // failure would contradict what the user can see on screen.
+          failed = false;
+          reply = `${err.message} App khol diya hai, waha se dhoond lo.`;
+          director.setEmotion('concerned', 0.5);
+        } else {
+          reply = `TV se baat nahi ho payi — ${err.message}`;
+          director.setEmotion('concerned', 0.85);
+          setError(err.message);
+        }
       }
 
       setMessages((prev) =>

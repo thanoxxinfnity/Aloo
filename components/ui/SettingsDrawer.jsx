@@ -54,6 +54,8 @@ import {
 import { fetchNvidiaModels } from '@/lib/modelCatalog';
 import { STT_LANGUAGES } from '@/services/sttService';
 import { connectTv, disconnectTv, subscribeTv, getTvState } from '@/services/lgWebosService';
+import { findTvs, canReachNetwork } from '@/services/tvNetService';
+import TvRemote from '@/components/ui/TvRemote';
 import { waitForVoices, speak, stopSpeaking } from '@/services/ttsLipSyncService';
 
 /* -------------------------------------------------------------------------- */
@@ -571,11 +573,38 @@ function AddModelRow({ kind, onUpload, onAddUrl }) {
  * spinning — "waiting" with no explanation is the most common way this feature
  * looks broken when it is working correctly.
  */
-function TvPanel({ settings, set }) {
+function TvPanel({ settings, set, onOpenRemote }) {
   const [link, setLink] = useState(getTvState());
   const [busy, setBusy] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [found, setFound] = useState(null);
+  const [scanError, setScanError] = useState('');
 
   useEffect(() => subscribeTv(setLink), []);
+
+  /**
+   * Search the network instead of asking the user to read an IP off a menu.
+   *
+   * Worth a button rather than a one-time setup step: a TV takes a new address
+   * from DHCP whenever it reconnects, and "the remote stopped working" is
+   * almost always that, not a fault.
+   */
+  const scan = async () => {
+    setScanning(true);
+    setScanError('');
+    setFound(null);
+    try {
+      const devices = await findTvs();
+      setFound(devices);
+      // One obvious answer needs no menu.
+      const only = devices.filter((d) => d.likelyTv);
+      if (only.length === 1) set('tvHost', only[0].address);
+    } catch (err) {
+      setScanError(err.message);
+    } finally {
+      setScanning(false);
+    }
+  };
 
   const connect = async () => {
     setBusy(true);
@@ -620,6 +649,44 @@ function TvPanel({ settings, set }) {
             />
           </Field>
 
+          {canReachNetwork() && (
+            <>
+              <button
+                type="button"
+                onClick={scan}
+                disabled={scanning}
+                className="hud-btn w-full disabled:opacity-40"
+              >
+                {scanning ? 'Dhoond raha hoon…' : 'Find my TV'}
+              </button>
+              {scanError && <p className="text-[9px] leading-tight text-pink-300">{scanError}</p>}
+              {found && found.length === 0 && (
+                <p className="text-[9px] leading-tight text-cyan-300/50">
+                  Network pe kuch nahi mila. TV on hai aur usi Wi-Fi pe hai? Warna IP haath se daal do.
+                </p>
+              )}
+              {found && found.length > 0 && (
+                <div className="space-y-1">
+                  {found.map((d) => (
+                    <button
+                      key={d.address}
+                      type="button"
+                      onClick={() => set('tvHost', d.address)}
+                      className={`hud-btn w-full justify-between ${
+                        settings.tvHost === d.address ? 'hud-btn-active' : ''
+                      }`}
+                    >
+                      <span className="tabular-nums">{d.address}</span>
+                      <span className="truncate text-[9px] opacity-60">
+                        {d.likelyTv ? 'webOS TV' : d.name || 'device'}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -655,11 +722,27 @@ function TvPanel({ settings, set }) {
             hint={'Say or type "TV band karo", "volume badhao", "Netflix chalao". Recognised on device, so it acts immediately instead of waiting on the model.'}
           />
 
-          <p className="text-[9px] leading-tight text-cyan-300/30">
-            Power OFF works. Power ON cannot: with the TV off there is no
-            connection to make, and waking it needs a Wake-on-LAN packet, which
-            a WebView cannot send.
-          </p>
+          <button
+            type="button"
+            onClick={onOpenRemote}
+            disabled={!settings.tvHost}
+            className="hud-btn w-full disabled:opacity-40"
+          >
+            Open Remote
+          </button>
+
+          {settings.tvMac ? (
+            <p className="text-[9px] leading-tight text-cyan-300/40">
+              {settings.tvName ? `${settings.tvName} — ` : ''}MAC {settings.tvMac} yaad hai,
+              isi se &quot;TV on karo&quot; kaam karta hai. TV me Settings → General →
+              &quot;Quick Start+&quot; on rakhna, warna band TV ka network card bhi so jata hai.
+            </p>
+          ) : (
+            <p className="text-[9px] leading-tight text-cyan-300/30">
+              Ek baar pair ho jaye, ALOO TV ka MAC address khud yaad kar lega — uske
+              baad &quot;TV on karo&quot; bhi chalega.
+            </p>
+          )}
         </>
       )}
     </>
@@ -679,6 +762,10 @@ export default function SettingsDrawer({
 }) {
   const [voices, setVoices] = useState([]);
   const [storageOk, setStorageOk] = useState(true);
+  /* The remote is a full-screen layer rather than a drawer section: it needs the
+     whole width for a D-pad, and it is used WHILE looking at the television, not
+     while reading settings. */
+  const [remoteOpen, setRemoteOpen] = useState(false);
   /* Seed list first so the picker is never empty, then swap in whatever NVIDIA
      actually serves right now. Hard-coded ids rot — see lib/modelCatalog.js. */
   const [nimCatalog, setNimCatalog] = useState({ models: NVIDIA_MODELS, live: false });
@@ -1100,7 +1187,7 @@ export default function SettingsDrawer({
 
           {/* ============ OPTICS ============ */}
           <Section icon={Tv} title="TV Control">
-            <TvPanel settings={settings} set={set} />
+            <TvPanel settings={settings} set={set} onOpenRemote={() => setRemoteOpen(true)} />
           </Section>
 
           <Section icon={Camera} title="Optical Sensors">
@@ -1711,6 +1798,8 @@ export default function SettingsDrawer({
           </button>
         </div>
       </aside>
+
+      <TvRemote open={remoteOpen} onClose={() => setRemoteOpen(false)} />
     </>
   );
 }

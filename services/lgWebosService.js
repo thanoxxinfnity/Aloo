@@ -24,9 +24,10 @@
  *
  * WHAT THIS CANNOT DO, and why:
  *
- *   • POWER ON. The TV's WebSocket server is off when the TV is off — there is
- *     nothing to connect to. Waking it needs a Wake-on-LAN magic packet, which
- *     is UDP, and a WebView has no UDP. Power OFF works.
+ *   • POWER ON is not an SSAP command and never can be: a TV that is off is not
+ *     running the server that would receive one. It takes a Wake-on-LAN magic
+ *     packet, which is UDP — impossible in a WebView, but ordinary from native
+ *     code, so `powerOnTv` now does it. See services/tvNetService.js.
  *
  *   • ARROW KEYS travel on a second socket the TV hands out on request (see
  *     `openPointerInput`), not on the main one.
@@ -41,6 +42,8 @@
 import { getSettings, setSettings } from '@/lib/settingsStore';
 import { TV_COMMANDS } from '@/lib/tvCommands';
 import { createSocket, cleartextBlockReason } from '@/lib/nativeSocket';
+import { wakeTv } from '@/services/tvNetService';
+import { findVideo } from '@/services/youtubeSearch';
 
 /**
  * The registration manifest.
@@ -111,6 +114,17 @@ const URIS = {
   [TV_COMMANDS.LAUNCH_APP]: 'ssap://system.launcher/launch',
   [TV_COMMANDS.OPEN_URL]: 'ssap://system.launcher/open',
   [TV_COMMANDS.TOAST]: 'ssap://system.notifications/createToast',
+  [TV_COMMANDS.SWITCH_INPUT]: 'ssap://tv/switchInput',
+  [TV_COMMANDS.SET_CHANNEL]: 'ssap://tv/openChannel',
+  [TV_COMMANDS.CLOSE_APP]: 'ssap://system.launcher/close',
+  [TV_COMMANDS.TYPE_TEXT]: 'ssap://com.webos.service.ime/insertText',
+  [TV_COMMANDS.BACKSPACE]: 'ssap://com.webos.service.ime/deleteCharacters',
+  [TV_COMMANDS.KEYBOARD_ENTER]: 'ssap://com.webos.service.ime/sendEnterKey',
+  // "Screen off" is not "power off": sound keeps playing and the panel goes
+  // dark, which is what people want when a music video is on.
+  [TV_COMMANDS.SCREEN_OFF]: 'ssap://com.webos.service.tvpower/power/turnOffScreen',
+  [TV_COMMANDS.SCREEN_ON]: 'ssap://com.webos.service.tvpower/power/turnOnScreen',
+  [TV_COMMANDS.SOUND_OUTPUT]: 'ssap://com.webos.service.apiadapter/audio/changeSoundOutput',
 };
 
 /** Commands the main socket cannot send — these ride the pointer socket. */
@@ -122,7 +136,21 @@ const BUTTONS = {
   [TV_COMMANDS.ENTER]: 'ENTER',
   [TV_COMMANDS.BACK]: 'BACK',
   [TV_COMMANDS.HOME]: 'HOME',
+  [TV_COMMANDS.EXIT]: 'EXIT',
+  [TV_COMMANDS.MENU]: 'MENU',
+  [TV_COMMANDS.INFO]: 'INFO',
+  [TV_COMMANDS.GUIDE]: 'GUIDE',
+  [TV_COMMANDS.DASH]: 'DASH',
 };
+
+/**
+ * Digits and colour keys, also pointer-socket buttons.
+ *
+ * Kept apart from BUTTONS because they are addressed by value rather than by
+ * command — "press 7" is one action with an argument, not ten commands.
+ */
+const DIGIT_BUTTONS = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
+export const COLOUR_BUTTONS = ['RED', 'GREEN', 'YELLOW', 'BLUE'];
 
 /* -------------------------------------------------------------------------- */
 /* Connection state                                                            */
@@ -229,6 +257,10 @@ function openLink({ url, insecure, host, label, timeoutMs }) {
         if (key && key !== s.tvClientKey) setSettings({ tvClientKey: key });
         registered = true;
         setState('ready', 'Connected');
+        // Fire-and-forget: the MAC address needed for a later power-on can only
+        // be read while the TV is awake, and this is that moment. Nothing waits
+        // on it, so a TV that will not answer costs nothing.
+        rememberTvIdentity();
         return settle(resolve);
       }
       if (msg.type === 'response' && msg.payload?.pairingType === 'PROMPT') {
@@ -460,6 +492,12 @@ async function pressButton(name) {
  * @param {Object} args     e.g. { level }, { appId }, { url }, { message }
  */
 export async function runTvCommand(command, args = {}) {
+  // Power ON is the one command that must NOT connect first — the whole point
+  // is that there is nothing to connect to yet.
+  if (command === TV_COMMANDS.POWER_ON) return powerOnTv();
+  if (command === TV_COMMANDS.PLAY_VIDEO) return playOnTv(args.query, args);
+  if (command === TV_COMMANDS.PRESS_DIGIT) return pressDigit(args.digit);
+
   if (!isTvConnected()) await connectTv();
 
   if (BUTTONS[command]) return pressButton(BUTTONS[command]);
@@ -475,20 +513,198 @@ export async function runTvCommand(command, args = {}) {
     case TV_COMMANDS.UNMUTE:
       return request(uri, { mute: false });
     case TV_COMMANDS.LAUNCH_APP:
+      // `params` carries a deep link when there is one — that is how a video
+      // starts playing rather than the app merely opening on its home screen.
+      return request(uri, args.params ? { id: args.appId, params: args.params } : { id: args.appId });
+    case TV_COMMANDS.CLOSE_APP:
       return request(uri, { id: args.appId });
     case TV_COMMANDS.OPEN_URL:
       return request(uri, { target: args.url });
     case TV_COMMANDS.TOAST:
       return request(uri, { message: args.message || 'ALOO' });
+    case TV_COMMANDS.SWITCH_INPUT:
+      return request(uri, { inputId: args.inputId });
+    case TV_COMMANDS.SET_CHANNEL:
+      return request(uri, { channelNumber: String(args.channel) });
+    case TV_COMMANDS.TYPE_TEXT:
+      // `replace: 0` appends; 1 would clear the field first. Appending is what
+      // a keyboard does, and it lets several calls build one query.
+      return request(uri, { text: String(args.text ?? ''), replace: 0 });
+    case TV_COMMANDS.BACKSPACE:
+      return request(uri, { count: Number(args.count) || 1 });
+    case TV_COMMANDS.SOUND_OUTPUT:
+      return request(uri, { output: args.output });
     default:
       return request(uri);
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Power on, which is not an SSAP command at all                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Wake the TV with a magic packet, then wait for it to answer.
+ *
+ * There is no such thing as an "on" command: a TV that is off is not running
+ * the server that would receive one. Wake-on-LAN is the whole mechanism, and it
+ * is fire-and-forget — nothing acknowledges the packet. So this sends it and
+ * then simply tries to connect for a while, which is the only real confirmation
+ * available.
+ *
+ * Requires the TV's MAC address, which is captured automatically the first time
+ * ALOO connects (see `rememberTvIdentity`), and requires "Quick Start+" or
+ * "Mobile TV On" to be enabled on the TV — without it the network card sleeps
+ * with the rest of the set and no packet can reach it.
+ */
+export async function powerOnTv({ waitMs = 25000 } = {}) {
+  const s = getSettings();
+  if (isTvConnected()) return { alreadyOn: true };
+
+  await wakeTv(s.tvMac);
+  setState('connecting', 'TV ko jaga raha hoon…');
+
+  // Polling rather than one long attempt: an LG takes anywhere from four to
+  // twenty seconds to bring its network stack up, and a single connect fired
+  // too early just fails.
+  const deadline = Date.now() + waitMs;
+  let lastError;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 3000));
+    try {
+      await connectTv({ timeoutMs: 8000 });
+      return { alreadyOn: false };
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw new Error(
+    'Wake packet chala gaya par TV ne jawab nahi diya. TV ke Settings → General → '
+    + '"Quick Start+" (ya purane sets me Network → "LG Connect Apps") on hona zaroori hai. '
+    + (lastError ? `(${lastError.message})` : '')
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Playing something by name                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * "Wo gaana chala do" — find it and start it playing.
+ *
+ * LG's YouTube app takes a `contentTarget`, which is what makes a video start
+ * instead of the app just opening. Getting from a spoken title to the id that
+ * URL needs is the hard half, and lives in services/youtubeSearch.js.
+ *
+ * If the search fails the app is still opened, because landing on YouTube is a
+ * far better outcome than an error message and a TV that did nothing.
+ */
+export async function playOnTv(query, { appId = 'youtube.leanback.v4' } = {}) {
+  if (!isTvConnected()) await connectTv();
+
+  let video = null;
+  let searchError = null;
+  try {
+    video = await findVideo(query);
+  } catch (err) {
+    searchError = err.message;
+  }
+
+  if (!video) {
+    await request(URIS[TV_COMMANDS.LAUNCH_APP], { id: appId });
+    const err = new Error(searchError || 'Video nahi mila.');
+    err.openedApp = true;
+    throw err;
+  }
+
+  await request(URIS[TV_COMMANDS.LAUNCH_APP], {
+    id: appId,
+    params: { contentTarget: `https://www.youtube.com/tv?v=${video.id}` },
+  });
+  return video;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Reading the TV's state                                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Ask the TV who it is, and keep the answer.
+ *
+ * The MAC address is the point: it is what Wake-on-LAN needs, and the ONLY
+ * moment it can be collected is while the TV is on and talking. Grabbing it on
+ * every successful connection means "TV on karo" works later without ever
+ * asking the user to go and read a hardware address off a menu.
+ */
+async function rememberTvIdentity() {
+  try {
+    const net = await request('ssap://com.webos.service.connectionmanager/getStatus', {}, 6000);
+    // Whichever interface is actually up — a TV on Wi-Fi has no wired MAC and
+    // vice versa. Either one wakes it.
+    const mac = net?.wiredInfo?.macAddress || net?.wifiInfo?.macAddress || '';
+    const clean = String(mac).trim();
+    if (clean && clean !== '00:00:00:00:00:00' && clean !== getSettings().tvMac) {
+      setSettings({ tvMac: clean });
+    }
+  } catch {
+    // Not fatal in the slightest: it only costs the power-on button, and the
+    // user can still type a MAC in by hand.
+  }
+  try {
+    const info = await request('ssap://system/getSystemInfo', {}, 6000);
+    const name = info?.modelName || '';
+    if (name && name !== getSettings().tvName) setSettings({ tvName: name });
+  } catch { /* cosmetic only */ }
 }
 
 /** Current volume and mute state, for the HUD. */
 export async function getTvVolume() {
   if (!isTvConnected()) await connectTv();
   return request('ssap://audio/getVolume');
+}
+
+/** Everything plugged into the back of the TV. */
+export async function listTvInputs() {
+  if (!isTvConnected()) await connectTv();
+  const res = await request('ssap://tv/getExternalInputList');
+  return (res?.devices || []).map((d) => ({
+    id: d.id,
+    label: d.label || d.id,
+    connected: d.connected !== false,
+  }));
+}
+
+/** What is on screen right now — used to label the remote. */
+export async function getForegroundApp() {
+  if (!isTvConnected()) await connectTv();
+  const res = await request('ssap://com.webos.applicationManager/getForegroundAppInfo');
+  return { appId: res?.appId || '', windowId: res?.windowId || '' };
+}
+
+/** Type into whatever text field the TV currently has focused. */
+export async function typeOnTv(text) {
+  return runTvCommand(TV_COMMANDS.TYPE_TEXT, { text });
+}
+
+/** One number key, via the pointer socket. */
+async function pressDigit(digit) {
+  const name = String(digit);
+  if (!DIGIT_BUTTONS.includes(name)) throw new Error(`Not a digit: ${digit}`);
+  if (!isTvConnected()) await connectTv();
+  return pressButton(name);
+}
+
+/** A colour key (RED/GREEN/YELLOW/BLUE), for teletext and app shortcuts. */
+export async function pressColour(name) {
+  if (!COLOUR_BUTTONS.includes(name)) throw new Error(`Not a colour key: ${name}`);
+  if (!isTvConnected()) await connectTv();
+  return pressButton(name);
+}
+
+/** Any pointer-socket button by name — the remote UI's escape hatch. */
+export async function pressTvButton(name) {
+  if (!isTvConnected()) await connectTv();
+  return pressButton(String(name).toUpperCase());
 }
 
 /** Everything installed on the TV — used to offer real app names in settings. */
