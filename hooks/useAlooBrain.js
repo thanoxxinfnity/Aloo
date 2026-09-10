@@ -18,8 +18,15 @@ import {
 } from '@/services/sttService';
 import { PROVIDERS, activeModel } from '@/lib/settingsStore';
 import { director } from '@/lib/animationDirector';
-import { parseTvCommand, describeTvCommand } from '@/lib/tvCommands';
+import {
+  parseTvCommand,
+  describeTvCommand,
+  parseDeviceCommand,
+  describeDeviceCommand,
+  DEVICE_COMMANDS,
+} from '@/lib/tvCommands';
 import { runTvCommand } from '@/services/lgWebosService';
+import { openHotspotSettings, openSettingsScreen } from '@/services/deviceSettingsService';
 
 /**
  * ALOO — Central state & routing hook.
@@ -160,6 +167,61 @@ export default function useAlooBrain() {
     [settings.ttsEnabled]
   );
 
+  /**
+   * Open a phone settings screen and say what happened.
+   *
+   * The wording matters more than usual here: the app CANNOT switch the
+   * hotspot on (Android reserves that for system apps), so the reply says the
+   * page is open rather than claiming the job is done. A confirmation the user
+   * disproves by glancing at their screen is worse than no confirmation.
+   */
+  const handleDeviceCommand = useCallback(
+    async (content, cmd) => {
+      const userMsg = { id: nextId(), role: 'user', content, at: Date.now() };
+      const replyId = nextId();
+      setMessages((prev) => [
+        ...prev,
+        userMsg,
+        { id: replyId, role: 'assistant', content: '', at: Date.now(), pending: true },
+      ]);
+
+      let reply;
+      let failed = false;
+      try {
+        if (cmd.command === DEVICE_COMMANDS.OPEN_HOTSPOT) {
+          await openHotspotSettings();
+        } else {
+          const screen = {
+            [DEVICE_COMMANDS.OPEN_WIFI]: 'wifi',
+            [DEVICE_COMMANDS.OPEN_BLUETOOTH]: 'bluetooth',
+            [DEVICE_COMMANDS.OPEN_DATA]: 'data',
+            [DEVICE_COMMANDS.OPEN_TTS]: 'tts',
+          }[cmd.command];
+          await openSettingsScreen(screen);
+        }
+        reply = describeDeviceCommand(cmd.command);
+        director.setEmotion('confident', 0.75);
+      } catch (err) {
+        failed = true;
+        reply = err.message;
+        director.setEmotion('concerned', 0.8);
+        setError(err.message);
+      }
+
+      setMessages((prev) =>
+        prev.map((m) => (m.id === replyId ? { ...m, content: reply, pending: false, isError: failed } : m))
+      );
+
+      if (settings.ttsEnabled) {
+        director.setState('speaking');
+        await speak(sanitizeForSpeech(reply));
+      }
+      director.setState('idle');
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [settings.ttsEnabled]
+  );
+
   const sendMessage = useCallback(
     async (text, { attachVision = true } = {}) => {
       const content = String(text || '').trim();
@@ -176,6 +238,15 @@ export default function useAlooBrain() {
          what should feel like pressing a button. Anything the matcher does not
          recognise falls straight through to the normal path, so conversation is
          unaffected. */
+      if (settings.deviceCommands !== false) {
+        const dev = parseDeviceCommand(content);
+        if (dev) {
+          busyRef.current = false;
+          await handleDeviceCommand(content, dev);
+          return;
+        }
+      }
+
       if (settings.tvEnabled && settings.tvVoiceCommands !== false) {
         const tv = parseTvCommand(content);
         if (tv) {
