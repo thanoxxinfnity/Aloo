@@ -30,10 +30,17 @@
  *
  *   • ARROW KEYS travel on a second socket the TV hands out on request (see
  *     `openPointerInput`), not on the main one.
+ *
+ * WHY THE SOCKET IS NOT `new WebSocket(...)`
+ * The TV only offers cleartext `ws://`, and inside the APK the page is served
+ * from `https://localhost`, where Chromium forbids cleartext sockets outright.
+ * `createSocket` returns a native-backed socket there and the ordinary browser
+ * one on the web; see lib/nativeSocket.js for the full account.
  */
 
 import { getSettings, setSettings } from '@/lib/settingsStore';
 import { TV_COMMANDS } from '@/lib/tvCommands';
+import { createSocket, cleartextBlockReason } from '@/lib/nativeSocket';
 
 /**
  * The registration manifest.
@@ -159,28 +166,25 @@ export function isTvConnected() {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Open the link and register. Resolves once the TV has accepted us.
+ * One connection attempt against one endpoint. Resolves when the TV has
+ * accepted our registration.
  *
- * @param {Object} [opts]
- * @param {number} [opts.timeoutMs] how long to wait for the on-screen prompt
+ * Failures are tagged `transport` when the socket itself never got anywhere —
+ * that is the only kind worth retrying on the other port. A TV that answered
+ * and then refused the pairing, or one that is waiting on a prompt nobody
+ * pressed, will behave identically on every port, so those are final.
  */
-export function connectTv({ timeoutMs = 60000 } = {}) {
+function openLink({ url, insecure, host, label, timeoutMs }) {
   const s = getSettings();
-  const host = (s.tvHost || '').trim();
-  if (!host) return Promise.reject(new Error('No TV address set. Add it in Settings → TV Control.'));
-
-  if (isTvConnected()) return Promise.resolve();
-  disconnectTv();
 
   return new Promise((resolve, reject) => {
-    setState('connecting', `Connecting to ${host}…`);
-
     let ws;
     try {
-      ws = new WebSocket(`ws://${host}:3000`);
+      ws = createSocket(url, { insecure });
     } catch (err) {
-      setState('error', err.message);
-      return reject(new Error(`Could not open a connection to ${host}: ${err.message}`));
+      const fail = new Error(`Could not open a connection to ${host}: ${err.message}`);
+      fail.transport = true;
+      return reject(fail);
     }
     socket = ws;
 
@@ -248,23 +252,105 @@ export function connectTv({ timeoutMs = 60000 } = {}) {
       }
     };
 
-    ws.onerror = () => {
-      // The WebSocket error event carries no detail by design, so say the
-      // useful thing instead of relaying an empty object.
-      setState('error', 'Connection failed');
-      if (!registered) {
-        settle(reject, new Error(
-          `Could not reach ${host}:3000. Check the TV is on, on the same Wi-Fi, and that the address is right.`
-        ));
-      }
+    // A browser's error event carries no detail by design; the native socket
+    // does, and it is far more useful ("refused on port 3000" vs. "no route to
+    // host" are different problems), so prefer it whenever it is there.
+    const explain = (detail) => detail
+      || `Could not reach ${host} on ${label}. Check the TV is on, on the same Wi-Fi, that `
+      + 'the address is right, and that Settings → Network → LG Connect Apps is on.';
+
+    const failed = (detail) => {
+      const err = new Error(detail);
+      err.transport = true;
+      return err;
     };
 
-    ws.onclose = () => {
+    ws.onerror = (event) => {
+      const detail = explain(event?.message);
+      setState('error', detail);
+      if (!registered) settle(reject, failed(detail));
+    };
+
+    ws.onclose = (event) => {
+      const wasRegistered = registered;
       registered = false;
       if (socket === ws) socket = null;
       if (state.status === 'ready') setState('idle', 'Disconnected');
+      // Closing before registration means the attempt failed. Without this the
+      // caller would sit on the 60s pairing timeout for something already known
+      // to be over.
+      if (!wasRegistered) {
+        const detail = explain(event?.reason);
+        setState('error', detail);
+        settle(reject, failed(detail));
+      }
     };
   });
+}
+
+/**
+ * The two places an LG TV might be listening.
+ *
+ * Older sets answer plain `ws://` on 3000. webOS 6 and later closed that and
+ * moved to `wss://` on 3001, presenting a self-signed certificate — which is
+ * why the secure attempt has to opt out of validation (see TvSocketPlugin).
+ * Which one a given TV uses is not something the TV advertises, so both are
+ * tried and the winner is remembered.
+ */
+function endpoints(host) {
+  const secureFirst = !!getSettings().tvSecurePort;
+  const list = [
+    { url: `ws://${host}:3000`, insecure: false, label: 'port 3000' },
+    { url: `wss://${host}:3001`, insecure: true, label: 'port 3001' },
+  ];
+  if (secureFirst) list.reverse();
+  // Drop whatever this platform cannot even attempt — in a browser tab served
+  // over https, the cleartext one is refused before a packet leaves.
+  return list.filter((e) => !cleartextBlockReason(e.url)).map((e) => ({ ...e, host }));
+}
+
+/**
+ * Open the link and register. Resolves once the TV has accepted us.
+ *
+ * @param {Object} [opts]
+ * @param {number} [opts.timeoutMs] how long to wait for the on-screen prompt
+ */
+export async function connectTv({ timeoutMs = 60000 } = {}) {
+  const host = (getSettings().tvHost || '').trim();
+  if (!host) throw new Error('No TV address set. Add it in Settings → TV Control.');
+  if (isTvConnected()) return;
+  disconnectTv();
+
+  setState('connecting', `Connecting to ${host}…`);
+
+  const tries = endpoints(host);
+  if (!tries.length) {
+    // Only reachable in a browser tab on an https origin: every route the TV
+    // offers is one the page is not allowed to take.
+    const why = cleartextBlockReason(`ws://${host}:3000`);
+    setState('error', 'Not available in the browser');
+    throw new Error(why);
+  }
+
+  let last;
+  for (const endpoint of tries) {
+    try {
+      await openLink({ ...endpoint, timeoutMs });
+      // Remember which port answered, so the next launch does not spend six
+      // seconds finding out again.
+      if (!!getSettings().tvSecurePort !== endpoint.insecure) {
+        setSettings({ tvSecurePort: endpoint.insecure });
+      }
+      return;
+    } catch (err) {
+      last = err;
+      // A TV that talked to us and then said no will say no on the other port
+      // too; only a dead socket is worth retrying elsewhere.
+      if (!err.transport) throw err;
+      disconnectTv();
+    }
+  }
+  throw last;
 }
 
 export function disconnectTv() {
@@ -324,16 +410,31 @@ async function openPointerInput() {
   if (!path) throw new Error('The TV did not provide a remote-input socket');
 
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(path);
-    const timer = setTimeout(() => reject(new Error('Remote-input socket did not open')), 8000);
+    let ws;
+    try {
+      // On a TV reached over 3001 this path comes back as wss://, carrying the
+      // same self-signed certificate the control socket already accepted.
+      ws = createSocket(path, { insecure: /^wss:/i.test(path) });
+    } catch (err) {
+      return reject(new Error(`Remote-input socket failed: ${err.message}`));
+    }
+    let done = false;
+    const timer = setTimeout(() => {
+      done = true;
+      reject(new Error('Remote-input socket did not open'));
+    }, 8000);
     ws.onopen = () => {
+      if (done) return;
+      done = true;
       clearTimeout(timer);
       pointerSocket = ws;
       resolve(ws);
     };
-    ws.onerror = () => {
+    ws.onerror = (event) => {
+      if (done) return;
+      done = true;
       clearTimeout(timer);
-      reject(new Error('Remote-input socket failed'));
+      reject(new Error(event?.message || 'Remote-input socket failed'));
     };
     ws.onclose = () => {
       if (pointerSocket === ws) pointerSocket = null;

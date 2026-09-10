@@ -36,6 +36,12 @@ dependencies {
     implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
     implementation project(':capacitor-android')
+    // Android ships no WebSocket client of its own (java.net.http.WebSocket is
+    // Java 11 and absent from the platform), and the WebView's own WebSocket is
+    // unusable here: Capacitor serves the page from https://localhost, and
+    // Chromium refuses to open a cleartext ws:// from an https origin. The LG
+    // TV only speaks cleartext ws://, so the socket has to live in native code.
+    implementation "com.squareup.okhttp3:okhttp:$okhttpVersion"
     testImplementation "junit:junit:$junitVersion"
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
     androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"

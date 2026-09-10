@@ -9,6 +9,7 @@ public class MainActivity extends BridgeActivity {
         // registry during that call, so anything added afterwards is invisible
         // to JavaScript.
         registerPlugin(SystemSettingsPlugin.class);
+        registerPlugin(TvSocketPlugin.class);
         super.onCreate(savedInstanceState);
     }
 }
