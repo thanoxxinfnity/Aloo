@@ -1,6 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- usesCleartextTraffic: a television on the local network speaks plain
+         ws:// on port 3000. LG's webOS runs no TLS listener for SSAP, so
+         blocking cleartext blocks TV control entirely.
+
+         This does NOT weaken the AI traffic: every provider endpoint is an
+         explicit https:// URL and stays encrypted. It permits unencrypted
+         connections to addresses on the user's own Wi-Fi. -->
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
@@ -8,7 +15,7 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:hardwareAccelerated="true"
-        android:usesCleartextTraffic="false"
+        android:usesCleartextTraffic="true"
         android:theme="@style/AppTheme">
 
         <activity

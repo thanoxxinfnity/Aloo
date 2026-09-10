@@ -18,6 +18,8 @@ import {
 } from '@/services/sttService';
 import { PROVIDERS, activeModel } from '@/lib/settingsStore';
 import { director } from '@/lib/animationDirector';
+import { parseTvCommand, describeTvCommand } from '@/lib/tvCommands';
+import { runTvCommand } from '@/services/lgWebosService';
 
 /**
  * ALOO — Central state & routing hook.
@@ -108,6 +110,56 @@ export default function useAlooBrain() {
   /* Core: send a turn                                                        */
   /* ======================================================================== */
 
+  /**
+   * Run a recognised TV command and report it in the conversation.
+   *
+   * It still writes both turns into the transcript, because a command that
+   * leaves no trace is indistinguishable from one that was never heard — and
+   * on a failure the user needs to see WHY, not just notice the TV did not
+   * move. She speaks the confirmation too, so it works with the screen off.
+   */
+  const handleTvCommand = useCallback(
+    async (content, tv) => {
+      const userMsg = { id: nextId(), role: 'user', content, at: Date.now() };
+      const replyId = nextId();
+      setMessages((prev) => [
+        ...prev,
+        userMsg,
+        { id: replyId, role: 'assistant', content: '', at: Date.now(), pending: true, tv: true },
+      ]);
+
+      let reply;
+      let failed = false;
+      try {
+        await runTvCommand(tv.command, tv.args);
+        reply = describeTvCommand(tv.command, tv.args);
+        director.setEmotion('confident', 0.8);
+      } catch (err) {
+        failed = true;
+        // The service already phrases its errors for a person ("accept the
+        // prompt on your TV"), so pass them through rather than wrapping them
+        // in something vaguer.
+        reply = `TV se baat nahi ho payi — ${err.message}`;
+        director.setEmotion('concerned', 0.85);
+        setError(err.message);
+      }
+
+      setMessages((prev) =>
+        prev.map((m) => (m.id === replyId ? { ...m, content: reply, pending: false, isError: failed } : m))
+      );
+
+      if (settings.ttsEnabled) {
+        director.setState('speaking');
+        await speak(sanitizeForSpeech(reply));
+      }
+      director.setState('idle');
+      // The mic re-arms itself: an effect below watches speaking/streaming/
+      // listening and re-opens it once all three are clear.
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [settings.ttsEnabled]
+  );
+
   const sendMessage = useCallback(
     async (text, { attachVision = true } = {}) => {
       const content = String(text || '').trim();
@@ -117,6 +169,22 @@ export default function useAlooBrain() {
       setError(null);
       setInterimTranscript('');
       stopSpeaking(); // barge-in: a new question cancels the old answer
+
+      /* TV COMMANDS SHORT-CIRCUIT THE MODEL.
+         "TV band karo" is unambiguous, and sending it to a language model so it
+         can tell us what we already know costs a second of network latency on
+         what should feel like pressing a button. Anything the matcher does not
+         recognise falls straight through to the normal path, so conversation is
+         unaffected. */
+      if (settings.tvEnabled && settings.tvVoiceCommands !== false) {
+        const tv = parseTvCommand(content);
+        if (tv) {
+          busyRef.current = false;
+          await handleTvCommand(content, tv);
+          return;
+        }
+      }
+
       director.setState('thinking');
 
       // Attach the live camera frame if vision is on and the model can take it.

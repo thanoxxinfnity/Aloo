@@ -39,6 +39,7 @@ import {
   Library,
   Lock,
   ClipboardPaste,
+  Tv,
 } from 'lucide-react';
 import { SKETCHFAB_CATALOG } from '@/lib/modelLibrary';
 
@@ -52,6 +53,7 @@ import {
 } from '@/lib/settingsStore';
 import { fetchNvidiaModels } from '@/lib/modelCatalog';
 import { STT_LANGUAGES } from '@/services/sttService';
+import { connectTv, disconnectTv, subscribeTv, getTvState } from '@/services/lgWebosService';
 import { waitForVoices, speak, stopSpeaking } from '@/services/ttsLipSyncService';
 
 /* -------------------------------------------------------------------------- */
@@ -560,6 +562,110 @@ function AddModelRow({ kind, onUpload, onAddUrl }) {
 /* Drawer                                                                      */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * TV pairing.
+ *
+ * The whole flow exists around one fact: the FIRST connection puts a prompt on
+ * the television that must be accepted with the physical remote, and nothing
+ * happens until it is. So the button reports that state explicitly instead of
+ * spinning — "waiting" with no explanation is the most common way this feature
+ * looks broken when it is working correctly.
+ */
+function TvPanel({ settings, set }) {
+  const [link, setLink] = useState(getTvState());
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => subscribeTv(setLink), []);
+
+  const connect = async () => {
+    setBusy(true);
+    try {
+      await connectTv();
+    } catch (err) {
+      // subscribeTv already carries the message into `link`; nothing to add.
+      console.warn('[ALOO/tv]', err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const tone =
+    link.status === 'ready' ? 'text-emerald-300'
+    : link.status === 'error' ? 'text-pink-300'
+    : 'text-cyan-300/70';
+
+  return (
+    <>
+      <Toggle
+        label="TV Control"
+        checked={settings.tvEnabled === true}
+        onChange={(v) => set('tvEnabled', v)}
+        hint="Control an LG (webOS) TV on the same Wi-Fi. Bluetooth is not used — a TV's Bluetooth carries audio out and a paired remote in, neither of which a phone app can drive."
+      />
+
+      {settings.tvEnabled && (
+        <>
+          <Field
+            label="TV Address"
+            hint="The TV's IP on your Wi-Fi. Find it on the TV under Settings → Network → Wi-Fi Connection → Advanced."
+          >
+            <input
+              className="hud-input"
+              value={settings.tvHost || ''}
+              onChange={(e) => set('tvHost', e.target.value.trim())}
+              placeholder="192.168.1.42"
+              inputMode="decimal"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </Field>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={connect}
+              disabled={busy || !settings.tvHost}
+              className="hud-btn flex-1 disabled:opacity-40"
+            >
+              {busy ? 'Connecting…' : settings.tvClientKey ? 'Reconnect' : 'Pair with TV'}
+            </button>
+            {settings.tvClientKey && (
+              <button
+                type="button"
+                onClick={() => {
+                  disconnectTv();
+                  set('tvClientKey', '');
+                }}
+                title="Forget the pairing"
+                className="hud-btn"
+              >
+                <Trash2 size={11} />
+              </button>
+            )}
+          </div>
+
+          <p className={`text-[9px] leading-tight ${tone}`}>
+            {link.message || (settings.tvClientKey ? 'Paired — will connect silently.' : 'Not paired yet.')}
+          </p>
+
+          <Toggle
+            label="Voice & Chat Commands"
+            checked={settings.tvVoiceCommands !== false}
+            onChange={(v) => set('tvVoiceCommands', v)}
+            hint={'Say or type "TV band karo", "volume badhao", "Netflix chalao". Recognised on device, so it acts immediately instead of waiting on the model.'}
+          />
+
+          <p className="text-[9px] leading-tight text-cyan-300/30">
+            Power OFF works. Power ON cannot: with the TV off there is no
+            connection to make, and waking it needs a Wake-on-LAN packet, which
+            a WebView cannot send.
+          </p>
+        </>
+      )}
+    </>
+  );
+}
+
 export default function SettingsDrawer({
   open,
   onClose,
@@ -993,6 +1099,10 @@ export default function SettingsDrawer({
           </Section>
 
           {/* ============ OPTICS ============ */}
+          <Section icon={Tv} title="TV Control">
+            <TvPanel settings={settings} set={set} />
+          </Section>
+
           <Section icon={Camera} title="Optical Sensors">
             <Toggle
               label="Live Camera Feed"
